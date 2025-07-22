@@ -3,6 +3,8 @@ places365/
 data_subset/
 predictions/
 
+*.zip
+
 # Ignore model checkpoints
 *.pt
 
