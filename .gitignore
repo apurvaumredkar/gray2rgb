@@ -1,0 +1,17 @@
+# Ignore datasets
+places365/
+data_subset/
+
+# Ignore model checkpoints
+*.pt
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Logs or temp files
+*.log
+*.tmp

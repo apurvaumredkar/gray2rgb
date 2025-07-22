@@ -4,6 +4,44 @@ import shutil
 import argparse
 from PIL import Image
 
+"""
+generate_data_subset.py
+
+This script creates a subset of the Places365 dataset. Outputs Grayscale and RGB subsets under output directories data_subset/gray and data_subset/rgb .
+
+USAGE:
+
+    python generate_data_subset.py
+
+    # Example with custom resolution and split sizes
+    python generate_data_subset.py \
+        --resolution 64 \
+        --train_size 3000 \
+        --val_size 500 \
+        --test_size 500
+
+INPUT ARGUMENTS:
+
+--base_dir         (str)   Default: ./places365
+    Path to the original Places365 dataset with subfolders: train/, val/, test/
+
+--output_rgb_dir   (str)   Default: ./data_subset/rgb
+    Path where the RGB subset images will be saved
+
+--output_gray_dir  (str)   Default: ./data_subset/gray
+    Path where the grayscale subset images will be saved
+
+--resolution       (int)   Default: 256
+    Desired resolution (square) to resize all output images (e.g., 64 -> 64x64)
+
+--train_size       (int)   Default: 10000
+--val_size         (int)   Default: 1000
+--test_size        (int)   Default: 2500
+    Number of images to randomly sample for each split
+
+Author: TeamSAS
+"""
+
 
 def count_images(folder_path):
     count = 0
