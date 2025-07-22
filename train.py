@@ -99,6 +99,8 @@ def train_model_pipeline():
     epochs = hparams.get("epochs", 10)
     lr = hparams.get("learning_rate", 1e-4)
     batch_size = hparams.get("batch_size", 16)
+    vit_embed_dim = hparams.get("vit_embed_dim", 512)
+    vit_heads = hparams.get("vit_heads", 8)
 
     gray_train_dir = "./data_subset/gray/train"
     rgb_train_dir = "./data_subset/rgb/train"
@@ -111,7 +113,7 @@ def train_model_pipeline():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    model = UNetViT().to(device)
+    model = UNetViT(vit_embed_dim=vit_embed_dim, vit_heads=vit_heads).to(device)
     loss_fn = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 

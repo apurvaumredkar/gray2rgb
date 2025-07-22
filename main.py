@@ -21,6 +21,8 @@ def main():
     if not (args.generate_data or args.train or args.evaluate):
         if not data_dirs_exist:
             generate_data_subset.generate_subset_threaded()
+        else:
+            print(f"Skipping data subset generation.")
         train.train_model_pipeline()
         evaluate.evaluate_model()
         return
