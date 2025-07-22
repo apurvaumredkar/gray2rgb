@@ -1,5 +1,9 @@
 {
-  "epochs": 10,
+  "train_size": 50000,
+  "val_size": 10000,
+  "test_size": 15000,
+  "resolution": 256,
+  "epochs": 25,
   "learning_rate": 0.0001,
   "batch_size": 8
 }

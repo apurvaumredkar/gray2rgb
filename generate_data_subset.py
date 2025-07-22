@@ -1,54 +1,17 @@
 import os
 import random
-import shutil
-import argparse
+import json
 from PIL import Image
-import concurrent.futures
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
 
 """
 generate_data_subset.py
 
-This script creates a subset of the Places365 dataset. Outputs Grayscale and RGB subsets under output directories data_subset/gray and data_subset/rgb .
-
-USAGE:
-
-    python generate_data_subset.py
-
-    # Example with custom resolution and split sizes
-    python generate_data_subset.py \
-        --resolution 64 \
-        --train_size 3000 \
-        --val_size 500 \
-        --test_size 500
-
-INPUT ARGUMENTS:
-
---base_dir         (str)   Default: ./places365
-    Path to the original Places365 dataset with subfolders: train/, val/, test/
-
---output_rgb_dir   (str)   Default: ./data_subset/rgb
-    Path where the RGB subset images will be saved
-
---output_gray_dir  (str)   Default: ./data_subset/gray
-    Path where the grayscale subset images will be saved
-
---resolution       (int)   Default: 256
-    Desired resolution (square) to resize all output images (e.g., 64 -> 64x64)
-
---train_size       (int)   Default: 10000
---val_size         (int)   Default: 1000
---test_size        (int)   Default: 2500
-    Number of images to randomly sample for each split
+Creates RGB and grayscale subsets from Places365 dataset based on sizes specified in hyperparameters.json.
 
 Author: TeamSAS
 """
-
-
-def count_images(folder_path):
-    count = 0
-    for root, _, files in os.walk(folder_path):
-        count += len([f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
-    return count
 
 
 def collect_image_paths(folder_path):
@@ -60,102 +23,84 @@ def collect_image_paths(folder_path):
     return image_paths
 
 
-def copy_and_resize_images(image_paths, dest_dir, resolution, convert_to_gray=False):
-    os.makedirs(dest_dir, exist_ok=True)
-    for src_path in image_paths:
-        file_name = os.path.basename(src_path)
-        dst_path = os.path.join(dest_dir, file_name)
+def copy_and_resize_images(rgb_paths, gray_paths, rgb_dest_dir, gray_dest_dir, resolution, desc=None, use_tqdm=True):
+    os.makedirs(rgb_dest_dir, exist_ok=True)
+    os.makedirs(gray_dest_dir, exist_ok=True)
 
-        img = Image.open(src_path).convert("RGB")
-        img = img.resize((resolution, resolution))
+    iterator = zip(rgb_paths, gray_paths)
+    if use_tqdm:
+        iterator = tqdm(iterator, total=len(rgb_paths), desc=desc, unit="img")
 
-        if convert_to_gray:
-            img = img.convert("L")
+    for idx, (rgb_path, gray_path) in enumerate(iterator, 1):
+        file_name = os.path.basename(rgb_path)
 
-        img.save(dst_path)
+        rgb_img = Image.open(rgb_path).convert("RGB")
+        rgb_img = rgb_img.resize((resolution, resolution))
+        rgb_img.save(os.path.join(rgb_dest_dir, file_name))
 
-
-def process_split(images, output_dir, resolution, convert_to_gray):
-    os.makedirs(output_dir, exist_ok=True)
-    for src_path in images:
-        file_name = os.path.basename(src_path)
-        dst_path = os.path.join(output_dir, file_name)
-
-        img = Image.open(src_path).convert("RGB")
-        img = img.resize((resolution, resolution))
-
-        if convert_to_gray:
-            img = img.convert("L")
-
-        img.save(dst_path)
+        gray_img = Image.open(gray_path).convert("L")
+        gray_img = gray_img.resize((resolution, resolution))
+        gray_img.save(os.path.join(gray_dest_dir, file_name))
 
 
-def generate_subset(base_dir, output_rgb_dir, output_gray_dir, split_sizes, resolution):
-    train_dir = os.path.join(base_dir, "train")
-    val_dir = os.path.join(base_dir, "val")
-    test_dir = os.path.join(base_dir, "test")
+def process_split(base_dir, output_rgb_dir, output_gray_dir, split, n_images, resolution):
+    split_dir = os.path.join(base_dir, split)
+    all_paths = collect_image_paths(split_dir)
+    all_paths.sort()
 
-    print("Counting images...")
-    print(f"Train: {count_images(train_dir)}, Val: {count_images(val_dir)}, Test: {count_images(test_dir)}")
-
-    print("Collecting image paths...")
-    train_images = collect_image_paths(train_dir)
-    val_images = collect_image_paths(val_dir)
-    test_images = collect_image_paths(test_dir)
+    total = len(all_paths)
+    if n_images > total:
+        raise ValueError(f"Requested {n_images} images but only {total} available in {split}.")
 
     random.seed(42)
-    selected_train = random.sample(train_images, split_sizes["train"])
-    selected_val = random.sample(val_images, split_sizes["val"])
-    selected_test = random.sample(test_images, split_sizes["test"])
+    selected_indices = random.sample(range(total), n_images)
+    selected_rgb_paths = [all_paths[i] for i in selected_indices]
+    selected_gray_paths = selected_rgb_paths
 
-    tasks = [
-        (selected_train, os.path.join(output_rgb_dir, "train"), resolution, False),
-        (selected_val, os.path.join(output_rgb_dir, "val"), resolution, False),
-        (selected_test, os.path.join(output_rgb_dir, "test"), resolution, False),
-        (selected_train, os.path.join(output_gray_dir, "train"), resolution, True),
-        (selected_val, os.path.join(output_gray_dir, "val"), resolution, True),
-        (selected_test, os.path.join(output_gray_dir, "test"), resolution, True),
-    ]
+    rgb_dest_dir = os.path.join(output_rgb_dir, split)
+    gray_dest_dir = os.path.join(output_gray_dir, split)
 
-    print("Starting multithreaded processing of splits...")
+    print(f"[{split}] Processing {n_images} images...")
+    copy_and_resize_images(selected_rgb_paths, selected_gray_paths,
+                           rgb_dest_dir, gray_dest_dir,
+                           resolution, desc=f"Processing {split} images")
+    print(f"[{split}] Done.")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-        futures = [executor.submit(process_split, *task) for task in tasks]
-        for future in concurrent.futures.as_completed(futures):
+
+def generate_subset_threaded(base_dir, output_rgb_dir, output_gray_dir, split_sizes, resolution):
+    splits = ["train", "val", "test"]
+
+    print("Starting threaded processing of splits...")
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = []
+        for split in splits:
+            futures.append(
+                executor.submit(
+                    process_split,
+                    base_dir, output_rgb_dir, output_gray_dir,
+                    split, split_sizes[split], resolution
+                )
+            )
+        for future in futures:
             future.result()
 
-    print("\nSubset generation complete.")
-    print(f"Final RGB image counts — Train: {count_images(os.path.join(output_rgb_dir, 'train'))}, "
-          f"Val: {count_images(os.path.join(output_rgb_dir, 'val'))}, "
-          f"Test: {count_images(os.path.join(output_rgb_dir, 'test'))}")
+    print("\nAll splits processed using threads.")
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Generate RGB and grayscale subsets from Places365.")
-
-    parser.add_argument("--base_dir", type=str, default="./places365",
-                        help="Root directory of original Places365 dataset.")
-    parser.add_argument("--output_rgb_dir", type=str, default="./data_subset/rgb",
-                        help="Directory to save RGB subset.")
-    parser.add_argument("--output_gray_dir", type=str, default="./data_subset/gray",
-                        help="Directory to save grayscale subset.")
-    parser.add_argument("--resolution", type=int, default=256,
-                        help="Output image resolution (square).")
-    parser.add_argument("--train_size", type=int, default=10000,
-                        help="Number of training images.")
-    parser.add_argument("--val_size", type=int, default=1000,
-                        help="Number of validation images.")
-    parser.add_argument("--test_size", type=int, default=2500,
-                        help="Number of test images.")
-
-    args = parser.parse_args()
+    with open("hyperparameters.json", "r") as f:
+        hparams = json.load(f)
 
     split_sizes = {
-        "train": args.train_size,
-        "val": args.val_size,
-        "test": args.test_size
+        "train": hparams.get("train_size", 50000),
+        "val": hparams.get("val_size", 10000),
+        "test": hparams.get("test_size", 15000)
     }
+    resolution = hparams.get("resolution", 256)
 
-    generate_subset(args.base_dir, args.output_rgb_dir, args.output_gray_dir, split_sizes, args.resolution)
+    base_dir = "./places365"
+    output_rgb_dir = "./data_subset/rgb"
+    output_gray_dir = "./data_subset/gray"
+
+    generate_subset_threaded(base_dir, output_rgb_dir, output_gray_dir, split_sizes, resolution)
