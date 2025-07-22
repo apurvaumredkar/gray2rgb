@@ -1,6 +1,7 @@
-# Ignore datasets
+# Ignore datasets & prediction folders
 places365/
 data_subset/
+predictions/
 
 # Ignore model checkpoints
 *.pt

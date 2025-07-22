@@ -58,7 +58,14 @@ def psnr_metric(pred, target):
 def ssim_metric(pred, target):
     pred_np = pred.cpu().numpy().transpose(1, 2, 0)
     target_np = target.cpu().numpy().transpose(1, 2, 0)
-    return compare_ssim(target_np, pred_np, multichannel=True, data_range=1.0)
+    ssim = compare_ssim(
+        target_np,
+        pred_np,
+        channel_axis=2,  # Use this instead of multichannel=True
+        data_range=1.0,
+        win_size=7  # default is 7, can adjust if needed
+    )
+    return ssim
 
 
 def lpips_metric(lpips_fn, pred, target):
@@ -115,7 +122,7 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)
 
     model = UNetViT().to(device)
-    checkpoint_path = "checkpoints/latest_model.pt"  # Update path accordingly
+    checkpoint_path = "checkpoints/model_e1_20250722_021134.pt"  # Update path accordingly
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     metrics = evaluate(model, test_loader, device)
