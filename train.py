@@ -92,17 +92,7 @@ def get_checkpoint_filename(epoch, save_dir="checkpoints"):
     return os.path.join(save_dir, filename)
 
 
-def train_model(model, train_loader, val_loader, loss_fn, optimizer, device, epochs):
-    for epoch in range(1, epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, loss_fn, optimizer, device, epoch, epochs)
-        val_loss = validate(model, val_loader, loss_fn, device, epoch, epochs)
-
-        checkpoint_path = get_checkpoint_filename(epoch)
-        torch.save(model.state_dict(), checkpoint_path)
-        print(f"Saved checkpoint: {checkpoint_path}")
-
-
-def main():
+def train_model_pipeline():
     with open("hyperparameters.json", "r") as f:
         hparams = json.load(f)
 
@@ -125,8 +115,13 @@ def main():
     loss_fn = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    train_model(model, train_loader, val_loader, loss_fn, optimizer, device, epochs)
+    for epoch in range(1, epochs + 1):
+        train_one_epoch(model, train_loader, loss_fn, optimizer, device, epoch, epochs)
+        validate(model, val_loader, loss_fn, device, epoch, epochs)
+        checkpoint_path = get_checkpoint_filename(epoch)
+        torch.save(model.state_dict(), checkpoint_path)
+        print(f"Saved checkpoint: {checkpoint_path}")
 
 
 if __name__ == "__main__":
-    main()
+    train_model_pipeline()

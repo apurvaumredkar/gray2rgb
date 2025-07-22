@@ -5,15 +5,6 @@ from PIL import Image
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 
-"""
-generate_data_subset.py
-
-Creates RGB and grayscale subsets from Places365 dataset based on sizes specified in hyperparameters.json.
-
-Author: TeamSAS
-"""
-
-
 def collect_image_paths(folder_path):
     image_paths = []
     for root, _, files in os.walk(folder_path):
@@ -21,7 +12,6 @@ def collect_image_paths(folder_path):
             if f.lower().endswith(('.jpg', '.jpeg', '.png')):
                 image_paths.append(os.path.join(root, f))
     return image_paths
-
 
 def copy_and_resize_images(rgb_paths, gray_paths, rgb_dest_dir, gray_dest_dir, resolution, desc=None, use_tqdm=True):
     os.makedirs(rgb_dest_dir, exist_ok=True)
@@ -41,7 +31,6 @@ def copy_and_resize_images(rgb_paths, gray_paths, rgb_dest_dir, gray_dest_dir, r
         gray_img = Image.open(gray_path).convert("L")
         gray_img = gray_img.resize((resolution, resolution))
         gray_img.save(os.path.join(gray_dest_dir, file_name))
-
 
 def process_split(base_dir, output_rgb_dir, output_gray_dir, split, n_images, resolution):
     split_dir = os.path.join(base_dir, split)
@@ -66,8 +55,22 @@ def process_split(base_dir, output_rgb_dir, output_gray_dir, split, n_images, re
                            resolution, desc=f"Processing {split} images")
     print(f"[{split}] Done.")
 
+def generate_subset_threaded():
+    with open("hyperparameters.json", "r") as f:
+        hparams = json.load(f)
 
-def generate_subset_threaded(base_dir, output_rgb_dir, output_gray_dir, split_sizes, resolution):
+    split_sizes = {
+        "train": hparams.get("train_size", 50000),
+        "val": hparams.get("val_size", 10000),
+        "test": hparams.get("test_size", 15000)
+    }
+    resolution = hparams.get("resolution", 256)
+
+    base_dir = "./places365"
+    output_rgb_dir = "./data_subset/rgb"
+    output_gray_dir = "./data_subset/gray"
+
+    from concurrent.futures import ThreadPoolExecutor
     splits = ["train", "val", "test"]
 
     print("Starting threaded processing of splits...")
@@ -87,20 +90,5 @@ def generate_subset_threaded(base_dir, output_rgb_dir, output_gray_dir, split_si
 
     print("\nAll splits processed using threads.")
 
-
 if __name__ == "__main__":
-    with open("hyperparameters.json", "r") as f:
-        hparams = json.load(f)
-
-    split_sizes = {
-        "train": hparams.get("train_size", 50000),
-        "val": hparams.get("val_size", 10000),
-        "test": hparams.get("test_size", 15000)
-    }
-    resolution = hparams.get("resolution", 256)
-
-    base_dir = "./places365"
-    output_rgb_dir = "./data_subset/rgb"
-    output_gray_dir = "./data_subset/gray"
-
-    generate_subset_threaded(base_dir, output_rgb_dir, output_gray_dir, split_sizes, resolution)
+    generate_subset_threaded()

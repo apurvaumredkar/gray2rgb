@@ -1,15 +1,11 @@
 import os
 import argparse
-import subprocess
+import generate_data_subset
+import train
+import evaluate
 
 def folder_exists(path):
     return os.path.exists(path) and os.path.isdir(path)
-
-def run_script(script_name):
-    print(f"\nRunning {script_name}...")
-    result = subprocess.run(["python", script_name])
-    if result.returncode != 0:
-        raise RuntimeError(f"{script_name} failed")
 
 def main():
     parser = argparse.ArgumentParser(description="Pipeline controller for data generation, training, evaluation")
@@ -24,18 +20,18 @@ def main():
     # If no flags specified, run all steps, generate data if missing
     if not (args.generate_data or args.train or args.evaluate):
         if not data_dirs_exist:
-            run_script("generate_data_subset.py")
-        run_script("train.py")
-        run_script("evaluate.py")
+            generate_data_subset.generate_subset_threaded()
+        train.train_model_pipeline()
+        evaluate.evaluate_model()
         return
 
     # Run requested steps based on flags
     if args.generate_data:
-        run_script("generate_data_subset.py")
+        generate_data_subset.generate_subset_threaded()
     if args.train:
-        run_script("train.py")
+        train.train_model_pipeline()
     if args.evaluate:
-        run_script("evaluate.py")
+        evaluate.evaluate_model()
 
 if __name__ == "__main__":
     main()

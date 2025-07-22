@@ -11,7 +11,6 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 from model import UNetViT
 
-
 device = (torch.device('cuda') if torch.cuda.is_available()
           else torch.device('mps') if torch.backends.mps.is_available()
           else torch.device('cpu'))
@@ -58,24 +57,23 @@ def psnr_metric(pred, target):
 def ssim_metric(pred, target):
     pred_np = pred.cpu().numpy().transpose(1, 2, 0)
     target_np = target.cpu().numpy().transpose(1, 2, 0)
-    ssim = compare_ssim(
-        target_np,
-        pred_np,
-        channel_axis=2,
-        data_range=1.0,
-        win_size=7
-    )
-    return ssim
+    return compare_ssim(target_np, pred_np, channel_axis=2, data_range=1.0, win_size=7)
 
 
 def save_prediction(pred_tensor, save_path):
     save_image(pred_tensor.clamp(0, 1), save_path)
 
 
-def evaluate(model, test_loader, device, save_dir="./predictions", metrics_json="metrics_results.json"):
-    os.makedirs(save_dir, exist_ok=True)
+def evaluate_model():
+    gray_test_dir = "./data_subset/gray/test"
+    rgb_test_dir = "./data_subset/rgb/test"
 
-    model.eval()
+    test_dataset = ColorizationDataset(gray_test_dir, rgb_test_dir)
+    test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)
+
+    model = UNetViT().to(device)
+    checkpoint_path = "checkpoints/model_e10_20250722_040306.pt"  # Update as needed
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     metrics = {
         "MAE": [],
@@ -83,6 +81,9 @@ def evaluate(model, test_loader, device, save_dir="./predictions", metrics_json=
         "SSIM": []
     }
 
+    os.makedirs("./predictions", exist_ok=True)
+
+    model.eval()
     with torch.no_grad():
         progress_bar = tqdm(test_loader, desc="Evaluating", leave=True)
         for gray, rgb, filenames in progress_bar:
@@ -94,31 +95,16 @@ def evaluate(model, test_loader, device, save_dir="./predictions", metrics_json=
                 metrics["PSNR"].append(psnr_metric(pred, target))
                 metrics["SSIM"].append(ssim_metric(pred, target))
 
-                save_path = os.path.join(save_dir, fname)
+                save_path = os.path.join("./predictions", fname)
                 save_prediction(pred, save_path)
 
     avg_metrics = {k: float(np.mean(v)) for k, v in metrics.items()}
 
-    with open(metrics_json, "w") as f:
+    with open("eval_results.json", "w") as f:
         json.dump(avg_metrics, f, indent=4)
 
-    return avg_metrics
-
-
-def main():
-    gray_test_dir = "./data_subset/gray/test"
-    rgb_test_dir = "./data_subset/rgb/test"
-
-    test_dataset = ColorizationDataset(gray_test_dir, rgb_test_dir)
-    test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)
-
-    model = UNetViT().to(device)
-    checkpoint_path = "checkpoints/model_e10_20250722_040306.pt"  # Update as needed
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-
-    metrics = evaluate(model, test_loader, device)
     print("Evaluation complete. Metrics saved to metrics_results.json")
 
 
 if __name__ == "__main__":
-    main()
+    evaluate_model()
