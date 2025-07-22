@@ -5,3 +5,5 @@ Team members:
 - Saksham Lakhera
 - Apurva Umredkar
 - Sharan Raj Sivakumar
+
+Link to original dataset: http://places2.csail.mit.edu/download.html
