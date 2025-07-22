@@ -3,6 +3,7 @@ import random
 import shutil
 import argparse
 from PIL import Image
+import concurrent.futures
 
 """
 generate_data_subset.py
@@ -74,6 +75,21 @@ def copy_and_resize_images(image_paths, dest_dir, resolution, convert_to_gray=Fa
         img.save(dst_path)
 
 
+def process_split(images, output_dir, resolution, convert_to_gray):
+    os.makedirs(output_dir, exist_ok=True)
+    for src_path in images:
+        file_name = os.path.basename(src_path)
+        dst_path = os.path.join(output_dir, file_name)
+
+        img = Image.open(src_path).convert("RGB")
+        img = img.resize((resolution, resolution))
+
+        if convert_to_gray:
+            img = img.convert("L")
+
+        img.save(dst_path)
+
+
 def generate_subset(base_dir, output_rgb_dir, output_gray_dir, split_sizes, resolution):
     train_dir = os.path.join(base_dir, "train")
     val_dir = os.path.join(base_dir, "val")
@@ -92,19 +108,21 @@ def generate_subset(base_dir, output_rgb_dir, output_gray_dir, split_sizes, reso
     selected_val = random.sample(val_images, split_sizes["val"])
     selected_test = random.sample(test_images, split_sizes["test"])
 
-    # RGB subset creation
-    print("Creating RGB subsets...")
-    for split_name, images in zip(["train", "val", "test"], [selected_train, selected_val, selected_test]):
-        dest_dir = os.path.join(output_rgb_dir, split_name)
-        copy_and_resize_images(images, dest_dir, resolution, convert_to_gray=False)
-        print(f"Copied {len(images)} RGB images to {dest_dir}")
+    tasks = [
+        (selected_train, os.path.join(output_rgb_dir, "train"), resolution, False),
+        (selected_val, os.path.join(output_rgb_dir, "val"), resolution, False),
+        (selected_test, os.path.join(output_rgb_dir, "test"), resolution, False),
+        (selected_train, os.path.join(output_gray_dir, "train"), resolution, True),
+        (selected_val, os.path.join(output_gray_dir, "val"), resolution, True),
+        (selected_test, os.path.join(output_gray_dir, "test"), resolution, True),
+    ]
 
-    # Grayscale subset creation
-    print("Creating grayscale subsets...")
-    for split_name, images in zip(["train", "val", "test"], [selected_train, selected_val, selected_test]):
-        dest_dir = os.path.join(output_gray_dir, split_name)
-        copy_and_resize_images(images, dest_dir, resolution, convert_to_gray=True)
-        print(f"Copied {len(images)} grayscale images to {dest_dir}")
+    print("Starting multithreaded processing of splits...")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(process_split, *task) for task in tasks]
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
 
     print("\nSubset generation complete.")
     print(f"Final RGB image counts — Train: {count_images(os.path.join(output_rgb_dir, 'train'))}, "
@@ -113,6 +131,8 @@ def generate_subset(base_dir, output_rgb_dir, output_gray_dir, split_sizes, reso
 
 
 if __name__ == "__main__":
+    import argparse
+
     parser = argparse.ArgumentParser(description="Generate RGB and grayscale subsets from Places365.")
 
     parser.add_argument("--base_dir", type=str, default="./places365",
