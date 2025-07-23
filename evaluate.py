@@ -4,77 +4,74 @@ import json
 import argparse
 import torch
 import numpy as np
-from PIL import Image
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
 from torchvision.utils import save_image
 from skimage.metrics import peak_signal_noise_ratio as compare_psnr
 from skimage.metrics import structural_similarity as compare_ssim
 from model import UNetViT
-
-"""
-evaluate.py
-
-Evaluates a UNetViT colorization model on the test split.
-
-- If --checkpoint is NOT provided, the newest checkpoint in ./checkpoints
-  (by timestamp in filename model_e<epoch>_<YYYYMMDD_HHMMSS>.pt) is used.
-- vit_embed_dim and vit_heads are read from hyperparameters.json unless
-  explicitly supplied via CLI.
-
-Outputs:
-- predictions/ : generated RGB images
-- eval_results.json : averaged MAE, PSNR, SSIM metrics
-"""
+import cv2
 
 device = (torch.device("cuda") if torch.cuda.is_available()
           else torch.device("mps") if torch.backends.mps.is_available()
           else torch.device("cpu"))
 
-
 class ColorizationDataset(Dataset):
-    def __init__(self, gray_dir, rgb_dir):
-        self.gray_dir = gray_dir
+    def __init__(self, rgb_dir):
         self.rgb_dir = rgb_dir
-        self.filenames = [f for f in os.listdir(gray_dir)
-                          if f.lower().endswith((".jpg", ".jpeg", ".png"))]
-        self.gray_tf = transforms.ToTensor()
-        self.rgb_tf = transforms.ToTensor()
+        self.filenames = [
+            f for f in os.listdir(rgb_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+        ]
 
     def __len__(self):
         return len(self.filenames)
 
-    def __getitem__(self, idx):
-        fname = self.filenames[idx]
-        g_path = os.path.join(self.gray_dir, fname)
-        r_path = os.path.join(self.rgb_dir, fname)
+    def __getitem__(self, index):
+        filename = self.filenames[index]
+        rgb_path = os.path.join(self.rgb_dir, filename)
+        rgb_img = cv2.imread(rgb_path)
+        rgb_img = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2RGB)
 
-        gray = Image.open(g_path).convert("L")
-        rgb = Image.open(r_path).convert("RGB")
+        
+        gray_img = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2GRAY)
+        L = gray_img.astype(np.float32) / 255.0 * 100.0
+        L = (L / 50.0) - 1.0
+        L = L[None, :, :]
 
-        return self.gray_tf(gray), self.rgb_tf(rgb), fname
+        
+        lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB).astype(np.float32)
+        ab = (lab[:,:,1:3] - 128.0) / 128.0
+        ab = ab.transpose(2, 0, 1)
 
+        L = torch.from_numpy(L).float()
+        ab = torch.from_numpy(ab).float()
+        return L, ab, filename
 
 def mae_metric(pred, target):
     return torch.mean(torch.abs(pred - target)).item()
-
 
 def psnr_metric(pred, target):
     p = pred.cpu().numpy().transpose(1, 2, 0)
     t = target.cpu().numpy().transpose(1, 2, 0)
     return compare_psnr(t, p, data_range=1.0)
 
-
 def ssim_metric(pred, target):
     p = pred.cpu().numpy().transpose(1, 2, 0)
     t = target.cpu().numpy().transpose(1, 2, 0)
     return compare_ssim(t, p, channel_axis=2, data_range=1.0, win_size=7)
 
+def lab_to_rgb_torch(L, ab):
+    L = (L + 1.0) * 50.0
+    ab = ab * 128.0
+    lab = torch.cat([L, ab], dim=0).permute(1,2,0).cpu().numpy()  
+    lab = np.clip(lab, [0, -128, -128], [100, 127, 127])  
+    rgb = cv2.cvtColor(lab.astype(np.float32), cv2.COLOR_LAB2RGB)
+    rgb = np.clip(rgb, 0, 1)
+    rgb = torch.from_numpy(rgb).permute(2,0,1).float()
+    return rgb
 
 def save_prediction(pred_tensor, save_path):
     save_image(pred_tensor.clamp(0, 1), save_path)
-
 
 def find_latest_checkpoint(ckpt_dir="checkpoints"):
     pattern = re.compile(r"model_e(\d+)_(\d{8}_\d{6})\.pt$")
@@ -90,15 +87,12 @@ def find_latest_checkpoint(ckpt_dir="checkpoints"):
     candidates.sort(reverse=True)
     return os.path.join(ckpt_dir, candidates[0][2])
 
-
 def load_hparams(path="hyperparameters.json"):
     with open(path, "r") as f:
         return json.load(f)
 
-
 def evaluate_model(checkpoint_path=None,
-                   gray_test_dir="./data_subset/gray/test",
-                   rgb_test_dir="./data_subset/rgb/test",
+                   rgb_test_dir="./data_subset/test",
                    save_dir="./predictions",
                    metrics_json="eval_results.json",
                    batch_size=8,
@@ -116,25 +110,48 @@ def evaluate_model(checkpoint_path=None,
         vit_embed_dim = vit_embed_dim or hparams.get("vit_embed_dim", 512)
         vit_heads = vit_heads or hparams.get("vit_heads", 8)
 
-    test_dataset = ColorizationDataset(gray_test_dir, rgb_test_dir)
+    test_dataset = ColorizationDataset(rgb_test_dir)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    model = UNetViT(vit_embed_dim=vit_embed_dim, vit_heads=vit_heads).to(device)
+    model = UNetViT(in_channels=1, out_channels=2, vit_embed_dim=vit_embed_dim, vit_heads=vit_heads).to(device)
     state = torch.load(checkpoint_path, map_location=device)
-    model.load_state_idict = model.load_state_dict(state)   # type: ignore
+    model.load_state_dict(state)
 
     metrics = {"MAE": [], "PSNR": [], "SSIM": []}
 
     model.eval()
     with torch.no_grad():
-        for gray, rgb, fnames in tqdm(test_loader, desc="Evaluating", leave=True):
-            gray, rgb = gray.to(device), rgb.to(device)
-            preds = model(gray)
-            for pred, tgt, fname in zip(preds, rgb, fnames):
-                metrics["MAE"].append(mae_metric(pred, tgt))
-                metrics["PSNR"].append(psnr_metric(pred, tgt))
-                metrics["SSIM"].append(ssim_metric(pred, tgt))
-                save_prediction(pred, os.path.join(save_dir, fname))
+        for L, ab, fnames in tqdm(test_loader, desc="Evaluating", leave=True):
+            L = L.to(device)
+            preds_ab = model(L)
+            for i in range(L.size(0)):
+                pred_ab = preds_ab[i].cpu()
+                input_L = L[i].cpu()
+                fname = fnames[i]
+
+                
+                pred_rgb = lab_to_rgb_torch(input_L, pred_ab)
+                save_prediction(pred_rgb, os.path.join(save_dir, fname))
+
+                pred_rgb_tensor = pred_rgb.clamp(0, 1).float()
+
+                
+                gt_path = os.path.join(rgb_test_dir, fname)
+                gt_rgb = cv2.imread(gt_path)
+                gt_rgb = cv2.cvtColor(gt_rgb, cv2.COLOR_BGR2RGB)
+                gt_rgb = np.clip(gt_rgb / 255.0, 0, 1)
+                gt_rgb = np.transpose(gt_rgb, (2, 0, 1))
+                gt_rgb_tensor = torch.from_numpy(gt_rgb).float()
+
+                if pred_rgb_tensor.shape != gt_rgb_tensor.shape:
+                    H, W = gt_rgb_tensor.shape[1:]
+                    pred_rgb_tensor = torch.nn.functional.interpolate(
+                        pred_rgb_tensor.unsqueeze(0), size=(H, W), mode='bilinear', align_corners=False
+                    ).squeeze(0)
+
+                metrics["MAE"].append(mae_metric(pred_rgb_tensor, gt_rgb_tensor))
+                metrics["PSNR"].append(psnr_metric(pred_rgb_tensor, gt_rgb_tensor))
+                metrics["SSIM"].append(ssim_metric(pred_rgb_tensor, gt_rgb_tensor))
 
     avg_metrics = {k: float(np.mean(v)) for k, v in metrics.items()}
     with open(metrics_json, "w") as f:
@@ -143,14 +160,12 @@ def evaluate_model(checkpoint_path=None,
     print("Evaluation complete. Metrics saved to", metrics_json)
     return avg_metrics
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate UNetViT colorization model.")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Path to model checkpoint (.pt). If omitted, latest in ./checkpoints is used.")
     parser.add_argument("--batch_size", type=int, default=8, help="Evaluation batch size.")
-    parser.add_argument("--gray_dir", type=str, default="./data_subset/gray/test")
-    parser.add_argument("--rgb_dir", type=str, default="./data_subset/rgb/test")
+    parser.add_argument("--rgb_dir", type=str, default="./data_subset/test")
     parser.add_argument("--pred_dir", type=str, default="./predictions")
     parser.add_argument("--metrics_out", type=str, default="eval_results.json")
     parser.add_argument("--hparams", type=str, default="hyperparameters.json",
@@ -162,7 +177,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     evaluate_model(checkpoint_path=args.checkpoint,
-                   gray_test_dir=args.gray_dir,
                    rgb_test_dir=args.rgb_dir,
                    save_dir=args.pred_dir,
                    metrics_json=args.metrics_out,

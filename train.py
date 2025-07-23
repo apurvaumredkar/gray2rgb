@@ -8,89 +8,99 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from PIL import Image
 from model import UNetViT
+import cv2
+
+from torch import autocast, GradScaler 
 
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-device = (torch.device('cuda') if torch.cuda.is_available()
-          else torch.device('mps') if torch.backends.mps.is_available()
-          else torch.device('cpu'))
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+    device_type = 'cuda'
+elif torch.backends.mps.is_available():
+    device = torch.device('mps')
+    device_type = 'mps'
+else:
+    device = torch.device('cpu')
+    device_type = 'cpu'
+
 print(f"Using device: {device}")
 
-
 class ColorizationDataset(Dataset):
-    def __init__(self, gray_dir, rgb_dir):
-        self.gray_dir = gray_dir
+    def __init__(self, rgb_dir):
         self.rgb_dir = rgb_dir
         self.filenames = [
-            f for f in os.listdir(gray_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+            f for f in os.listdir(rgb_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))
         ]
-
-        self.gray_transform = transforms.ToTensor()
-        self.rgb_transform = transforms.ToTensor()
 
     def __len__(self):
         return len(self.filenames)
 
     def __getitem__(self, index):
         filename = self.filenames[index]
-        gray_path = os.path.join(self.gray_dir, filename)
         rgb_path = os.path.join(self.rgb_dir, filename)
+        rgb_img = cv2.imread(rgb_path)
+        rgb_img = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2RGB)
 
-        gray_img = Image.open(gray_path).convert("L")
-        rgb_img = Image.open(rgb_path).convert("RGB")
+        
+        gray_img = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2GRAY)
+        L = gray_img.astype(np.float32) / 255.0 * 100.0
+        L = (L / 50.0) - 1.0
+        L = L[None, :, :]
 
-        gray_tensor = self.gray_transform(gray_img)
-        rgb_tensor = self.rgb_transform(rgb_img)
+        
+        lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB).astype(np.float32)
+        ab = (lab[:,:,1:3] - 128.0) / 128.0
+        ab = ab.transpose(2, 0, 1)
 
-        return gray_tensor, rgb_tensor
+        L = torch.from_numpy(L).float()
+        ab = torch.from_numpy(ab).float()
+        return L, ab
 
-
-def train_one_epoch(model, dataloader, loss_fn, optimizer, device, epoch, total_epochs):
+def train_one_epoch(model, dataloader, loss_fn, optimizer, device, device_type, epoch, total_epochs, scaler):
     model.train()
     total_loss = 0
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch}/{total_epochs} [Training]", leave=False)
-    for gray, rgb in progress_bar:
-        gray, rgb = gray.to(device), rgb.to(device)
+    for L, ab in progress_bar:
+        L, ab = L.to(device), ab.to(device)
         optimizer.zero_grad()
-        output = model(gray)
-        loss = loss_fn(output, rgb)
-        loss.backward()
-        optimizer.step()
+        with autocast(device_type=device_type):
+            output = model(L)
+            loss = loss_fn(output, ab)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         total_loss += loss.item()
         progress_bar.set_postfix(loss=loss.item())
     avg_loss = total_loss / len(dataloader)
     print(f"Epoch {epoch}/{total_epochs} Training Loss: {avg_loss:.4f}")
     return avg_loss
 
-
-def validate(model, dataloader, loss_fn, device, epoch, total_epochs):
+def validate(model, dataloader, loss_fn, device, device_type, epoch, total_epochs):
     model.eval()
     total_loss = 0
     with torch.no_grad():
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch}/{total_epochs} [Validation]", leave=False)
-        for gray, rgb in progress_bar:
-            gray, rgb = gray.to(device), rgb.to(device)
-            output = model(gray)
-            loss = loss_fn(output, rgb)
+        for L, ab in progress_bar:
+            L, ab = L.to(device), ab.to(device)
+            with autocast(device_type=device_type):
+                output = model(L)
+                loss = loss_fn(output, ab)
             total_loss += loss.item()
             progress_bar.set_postfix(loss=loss.item())
     avg_loss = total_loss / len(dataloader)
     print(f"Epoch {epoch}/{total_epochs} Validation Loss: {avg_loss:.4f}")
     return avg_loss
 
-
 def get_checkpoint_filename(epoch, save_dir="checkpoints"):
     os.makedirs(save_dir, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     filename = f"model_e{epoch}_{timestamp}.pt"
     return os.path.join(save_dir, filename)
-
 
 def train_model_pipeline():
     with open("hyperparameters.json", "r") as f:
@@ -102,28 +112,26 @@ def train_model_pipeline():
     vit_embed_dim = hparams.get("vit_embed_dim", 512)
     vit_heads = hparams.get("vit_heads", 8)
 
-    gray_train_dir = "./data_subset/gray/train"
-    rgb_train_dir = "./data_subset/rgb/train"
-    gray_val_dir = "./data_subset/gray/val"
-    rgb_val_dir = "./data_subset/rgb/val"
+    rgb_train_dir = "./data_subset/train"
+    rgb_val_dir = "./data_subset/val"
 
-    train_dataset = ColorizationDataset(gray_train_dir, rgb_train_dir)
-    val_dataset = ColorizationDataset(gray_val_dir, rgb_val_dir)
+    train_dataset = ColorizationDataset(rgb_train_dir)
+    val_dataset = ColorizationDataset(rgb_val_dir)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    model = UNetViT(vit_embed_dim=vit_embed_dim, vit_heads=vit_heads).to(device)
+    model = UNetViT(in_channels=1, out_channels=2, vit_embed_dim=vit_embed_dim, vit_heads=vit_heads).to(device)
     loss_fn = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    scaler = GradScaler()
 
     for epoch in range(1, epochs + 1):
-        train_one_epoch(model, train_loader, loss_fn, optimizer, device, epoch, epochs)
-        validate(model, val_loader, loss_fn, device, epoch, epochs)
+        train_one_epoch(model, train_loader, loss_fn, optimizer, device, device_type, epoch, epochs, scaler)
+        validate(model, val_loader, loss_fn, device, device_type, epoch, epochs)
         checkpoint_path = get_checkpoint_filename(epoch)
         torch.save(model.state_dict(), checkpoint_path)
         print(f"Saved checkpoint: {checkpoint_path}")
-
 
 if __name__ == "__main__":
     train_model_pipeline()

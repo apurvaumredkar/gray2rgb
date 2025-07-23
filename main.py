@@ -15,21 +15,21 @@ def main():
 
     args = parser.parse_args()
 
-    data_dirs_exist = folder_exists("./data_subset/rgb") and folder_exists("./data_subset/gray")
+    data_dirs_exist = folder_exists("./data_subset")
 
-    # If no flags specified, run all steps, generate data if missing
+    
     if not (args.generate_data or args.train or args.evaluate):
         if not data_dirs_exist:
-            generate_data_subset.generate_subset_threaded()
+            generate_data_subset.generate_subset()
         else:
-            print(f"Skipping data subset generation.")
+            print("Skipping data subset generation.")
         train.train_model_pipeline()
         evaluate.evaluate_model()
         return
 
-    # Run requested steps based on flags
+    
     if args.generate_data:
-        generate_data_subset.generate_subset_threaded()
+        generate_data_subset.generate_subset()
     if args.train:
         train.train_model_pipeline()
     if args.evaluate:
