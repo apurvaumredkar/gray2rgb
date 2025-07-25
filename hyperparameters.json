@@ -3,9 +3,9 @@
   "val_size": 10000,
   "test_size": 20000,
   "resolution": 256,
-  "epochs": 25,
-  "learning_rate": 0.0001,
+  "epochs": 30,
+  "learning_rate": 0.001,
   "batch_size": 16,
-  "vit_embed_dim": 512,
-  "vit_heads": 8
+  "vit_embed_dim": 256,
+  "vit_heads": 4
 }

@@ -124,5 +124,11 @@ class UNetViT(nn.Module):
 
 if __name__ == "__main__":
     from torchinfo import summary
-    model = UNetViT()
+    import json
+    with open("hyperparameters.json", "r") as f:
+        hparams = json.load(f)
+    vit_embed_dim = hparams.get("vit_embed_dim", 512)
+    vit_heads = hparams.get("vit_heads", 8)
+    model = UNetViT(in_channels=1, out_channels=2,
+                    vit_embed_dim=vit_embed_dim, vit_heads=vit_heads)
     print(summary(model, input_size=(1,1,256,256)))

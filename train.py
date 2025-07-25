@@ -67,7 +67,7 @@ class ColorizationDataset(Dataset):
 
 
 def lab_to_rgb_torch(L, ab):
-    lab = torch.cat([L * 50.0 + 50.0, ab * 128.0], dim=1)
+    lab = torch.cat([(L + 1) * 50.0, ab * 128.0], dim=1)
     rgb = kornia.color.lab_to_rgb(lab)
     return rgb.clamp(0, 1)
 
@@ -163,11 +163,13 @@ def train_model_pipeline():
     for epoch in range(1, epochs + 1):
         train_one_epoch(model, train_loader, perc_loss_fn, optimizer, device,
                         device_type, epoch, epochs, scaler, mse_weight, perc_weight)
-        validate(model, val_loader, perc_loss_fn, device,
-                 device_type, epoch, epochs, mse_weight, perc_weight)
+        
         checkpoint_path = get_checkpoint_filename(epoch)
         torch.save(model.state_dict(), checkpoint_path)
         print(f"Saved checkpoint: {checkpoint_path}")
+
+        validate(model, val_loader, perc_loss_fn, device,
+                 device_type, epoch, epochs, mse_weight, perc_weight)
 
 
 if __name__ == "__main__":

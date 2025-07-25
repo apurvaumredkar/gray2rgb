@@ -62,12 +62,13 @@ def ssim_metric(pred, target):
     return compare_ssim(t, p, channel_axis=2, data_range=1.0, win_size=7)
 
 def lab_to_rgb_torch(L, ab):
-    L_dn = (L + 1.0) * 50.0 / 100.0  # [0,1]
-    ab_dn = ab  # ab already in [-1,1] for Kornia
+    L_dn = (L + 1.0) * 50.0 
+    ab_dn = ab * 128.0      
 
     lab = torch.cat([L_dn, ab_dn], dim=0).unsqueeze(0)  # [1,3,H,W]
     rgb = kornia.color.lab_to_rgb(lab).squeeze(0).clamp(0, 1)
     return rgb
+
 
 def save_prediction(pred_tensor, save_path):
     save_image(pred_tensor.clamp(0, 1), save_path)
