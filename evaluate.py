@@ -42,13 +42,8 @@ class ColorizationDataset(Dataset):
         L = (L / 50.0) - 1.0
         L = L[None, :, :]
 
-        lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB).astype(np.float32)
-        ab = (lab[:, :, 1:3] - 128.0) / 128.0
-        ab = ab.transpose(2, 0, 1)
-
         L = torch.from_numpy(L).float()
-        ab = torch.from_numpy(ab).float()
-        return L, ab, filename
+        return L, filename
 
 
 def mae_metric(pred, target):
@@ -131,7 +126,7 @@ def evaluate_model(checkpoint_path=None):
     metrics = {"MAE": [], "PSNR": [], "SSIM": [], "Perceptual": []}
 
     with torch.no_grad():
-        for L, ab, fnames in tqdm(test_loader, desc="Evaluating", leave=True):
+        for L, fnames in tqdm(test_loader, desc="Evaluating", leave=True):
             L = L.to(device)
             with torch.amp.autocast(device_type=device_type):   # pyright: ignore[reportPrivateImportUsage]
                 preds_ab = model(L)

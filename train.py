@@ -54,16 +54,10 @@ class ColorizationDataset(Dataset):
         L = gray_img.astype(np.float32) / 255.0 * 100.0
         L = (L / 50.0) - 1.0
         L = L[None, :, :]
-
-        lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB).astype(np.float32)
-        ab = (lab[:, :, 1:3] - 128.0) / 128.0
-        ab = ab.transpose(2, 0, 1)
-
         L = torch.from_numpy(L).float()
-        ab = torch.from_numpy(ab).float()
         rgb_img = torch.from_numpy(
             (rgb_img / 255.0).astype(np.float32)).permute(2, 0, 1)
-        return L, ab, rgb_img
+        return L, rgb_img
 
 
 def lab_to_rgb_torch(L, ab):
@@ -72,41 +66,36 @@ def lab_to_rgb_torch(L, ab):
     return rgb.clamp(0, 1)
 
 
-def train_one_epoch(model, dataloader, perc_loss_fn, optimizer, device, device_type, epoch, total_epochs, scaler, mse_weight=0.0, perc_weight=1.0):
+def train_one_epoch(model, dataloader, perc_loss_fn, optimizer, device, device_type, epoch, total_epochs, scaler):
     model.train()
     total_loss = 0
     progress_bar = tqdm(
         dataloader, desc=f"Epoch {epoch}/{total_epochs} [Training]", leave=False)
-    for L, ab, gt_rgb in progress_bar:
-        L, ab, gt_rgb = L.to(device), ab.to(device), gt_rgb.to(device)
+    for L, gt_rgb in progress_bar:
+        L, gt_rgb = L.to(device), gt_rgb.to(device)
         optimizer.zero_grad()
         with autocast(device_type=device_type):
             pred_ab = model(L)
             pred_rgb = lab_to_rgb_torch(L, pred_ab).to(device)
-            perc_loss = perc_loss_fn(pred_rgb, gt_rgb)
-            if mse_weight > 0:
-                mse_loss = nn.MSELoss()(pred_ab, ab)
-                loss = mse_weight * mse_loss + perc_weight * perc_loss
-            else:
-                loss = perc_loss
+            loss = perc_loss_fn(pred_rgb, gt_rgb)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         total_loss += loss.item()
-        progress_bar.set_postfix(loss=loss.item(), perc_loss=perc_loss.item())
+        progress_bar.set_postfix(loss=loss.item())
     avg_loss = total_loss / len(dataloader)
     print(f"Epoch {epoch}/{total_epochs} Training Loss: {avg_loss:.4f}")
     return avg_loss
 
 
-def validate(model, dataloader, perc_loss_fn, device, device_type, epoch, total_epochs, mse_weight=0.0, perc_weight=1.0):
+def validate(model, dataloader, perc_loss_fn, device, device_type, epoch, total_epochs):
     model.eval()
     total_loss = 0
     with torch.no_grad():
         progress_bar = tqdm(
             dataloader, desc=f"Epoch {epoch}/{total_epochs} [Validation]", leave=False)
-        for L, ab, gt_rgb in progress_bar:
-            L, ab, gt_rgb = L.to(device), ab.to(device), gt_rgb.to(device)
+        for L, gt_rgb in progress_bar:
+            L, gt_rgb = L.to(device), gt_rgb.to(device)
             with autocast(device_type=device_type):
                 pred_ab = model(L)
                 pred_rgb = lab_to_rgb_torch(L, pred_ab).to(device)
@@ -131,10 +120,10 @@ def train_model_pipeline():
         hparams = json.load(f)
 
     epochs = hparams.get("epochs", 10)
-    lr = hparams.get("learning_rate", 1e-4)
-    batch_size = hparams.get("batch_size", 16)
-    vit_embed_dim = hparams.get("vit_embed_dim", 512)
-    vit_heads = hparams.get("vit_heads", 8)
+    lr = hparams.get("learning_rate", 1e-3)
+    batch_size = hparams.get("batch_size", 8)
+    vit_embed_dim = hparams.get("vit_embed_dim", 128)
+    vit_heads = hparams.get("vit_heads", 4)
 
     rgb_train_dir = "./data_subset/train"
     rgb_val_dir = "./data_subset/val"
@@ -151,9 +140,6 @@ def train_model_pipeline():
     perc_loss_fn = VGGPerceptualLoss().to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scaler = GradScaler()
-
- 
- 
 
     epoch_logs = []
 
