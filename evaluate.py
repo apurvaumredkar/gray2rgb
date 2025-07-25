@@ -12,6 +12,7 @@ from skimage.metrics import structural_similarity as compare_ssim
 from model import UNetViT
 from perceptual_loss import VGGPerceptualLoss  
 import cv2
+import kornia
 
 device = (torch.device("cuda") if torch.cuda.is_available()
           else torch.device("mps") if torch.backends.mps.is_available()
@@ -61,13 +62,11 @@ def ssim_metric(pred, target):
     return compare_ssim(t, p, channel_axis=2, data_range=1.0, win_size=7)
 
 def lab_to_rgb_torch(L, ab):
-    L = (L + 1.0) * 50.0
-    ab = ab * 128.0
-    lab = torch.cat([L, ab], dim=0).permute(1,2,0).cpu().numpy()  
-    lab = np.clip(lab, [0, -128, -128], [100, 127, 127])  
-    rgb = cv2.cvtColor(lab.astype(np.float32), cv2.COLOR_LAB2RGB)
-    rgb = np.clip(rgb, 0, 1)
-    rgb = torch.from_numpy(rgb).permute(2,0,1).float()
+    L_dn = (L + 1.0) * 50.0 / 100.0  # [0,1]
+    ab_dn = ab  # ab already in [-1,1] for Kornia
+
+    lab = torch.cat([L_dn, ab_dn], dim=0).unsqueeze(0)  # [1,3,H,W]
+    rgb = kornia.color.lab_to_rgb(lab).squeeze(0).clamp(0, 1)
     return rgb
 
 def save_prediction(pred_tensor, save_path):
@@ -91,24 +90,20 @@ def load_hparams(path="hyperparameters.json"):
     with open(path, "r") as f:
         return json.load(f)
 
-def evaluate_model(checkpoint_path=None,
-                   rgb_test_dir="./data_subset/test",
-                   save_dir="./predictions",
-                   metrics_json="eval_results.json",
-                   batch_size=8,
-                   vit_embed_dim=None,
-                   vit_heads=None,
-                   hparam_path="hyperparameters.json"):
+def evaluate_model(checkpoint_path=None):
+    hparams = load_hparams("hyperparameters.json")
+    rgb_test_dir = hparams.get("test_dir", "./data_subset/test")
+    save_dir = hparams.get("pred_dir", "./predictions")
+    metrics_json = hparams.get("metrics_out", "eval_results.json")
+    batch_size = hparams.get("batch_size", 8)
+    vit_embed_dim = hparams.get("vit_embed_dim", 512)
+    vit_heads = hparams.get("vit_heads", 8)
+
     os.makedirs(save_dir, exist_ok=True)
 
     if checkpoint_path is None:
         checkpoint_path = find_latest_checkpoint("checkpoints")
     print(f"Using checkpoint: {checkpoint_path}")
-
-    if vit_embed_dim is None or vit_heads is None:
-        hparams = load_hparams(hparam_path)
-        vit_embed_dim = vit_embed_dim or hparams.get("vit_embed_dim", 512)
-        vit_heads = vit_heads or hparams.get("vit_heads", 8)
 
     test_dataset = ColorizationDataset(rgb_test_dir)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
@@ -172,23 +167,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate UNetViT colorization model.")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Path to model checkpoint (.pt). If omitted, latest in ./checkpoints is used.")
-    parser.add_argument("--batch_size", type=int, default=8, help="Evaluation batch size.")
-    parser.add_argument("--rgb_dir", type=str, default="./data_subset/test")
-    parser.add_argument("--pred_dir", type=str, default="./predictions")
-    parser.add_argument("--metrics_out", type=str, default="eval_results.json")
-    parser.add_argument("--hparams", type=str, default="hyperparameters.json",
-                        help="Path to hyperparameters JSON.")
-    parser.add_argument("--vit_embed_dim", type=int, default=None,
-                        help="Override vit_embed_dim (else taken from hparams).")
-    parser.add_argument("--vit_heads", type=int, default=None,
-                        help="Override vit_heads (else taken from hparams).")
     args = parser.parse_args()
 
-    evaluate_model(checkpoint_path=args.checkpoint,
-                   rgb_test_dir=args.rgb_dir,
-                   save_dir=args.pred_dir,
-                   metrics_json=args.metrics_out,
-                   batch_size=args.batch_size,
-                   vit_embed_dim=args.vit_embed_dim,
-                   vit_heads=args.vit_heads,
-                   hparam_path=args.hparams)
+    evaluate_model(checkpoint_path=args.checkpoint)
