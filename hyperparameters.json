@@ -1,7 +1,7 @@
 {
-  "train_size": 50000,
-  "val_size": 10000,
-  "test_size": 15000,
+  "train_size": 80000,
+  "val_size": 20000,
+  "test_size": 25000,
   "resolution": 256,
   "epochs": 10,
   "learning_rate": 0.0001,

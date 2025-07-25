@@ -3,6 +3,9 @@ import random
 import json
 from PIL import Image
 from tqdm import tqdm
+import shutil
+
+ORIGINAL_RESOLUTION = 256
 
 def collect_image_paths(folder_path):
     image_paths = []
@@ -11,6 +14,16 @@ def collect_image_paths(folder_path):
             if f.lower().endswith(('.jpg', '.jpeg', '.png')):
                 image_paths.append(os.path.join(root, f))
     return image_paths
+
+def copy_images(rgb_paths, rgb_dest_dir, desc=None, use_tqdm=True):
+    os.makedirs(rgb_dest_dir, exist_ok=True)
+    iterator = rgb_paths
+    if use_tqdm:
+        iterator = tqdm(rgb_paths, total=len(rgb_paths), desc=desc, unit="img")
+    for rgb_path in iterator:
+        file_name = os.path.basename(rgb_path)
+        dest_path = os.path.join(rgb_dest_dir, file_name)
+        shutil.copy2(rgb_path, dest_path)
 
 def copy_and_resize_images(rgb_paths, rgb_dest_dir, resolution, desc=None, use_tqdm=True):
     os.makedirs(rgb_dest_dir, exist_ok=True)
@@ -35,7 +48,12 @@ def process_split(base_dir, output_rgb_dir, split, n_images, resolution):
     selected_rgb_paths = [all_paths[i] for i in selected_indices]
     rgb_dest_dir = os.path.join(output_rgb_dir, split)
     print(f"[{split}] Processing {n_images} images...")
-    copy_and_resize_images(selected_rgb_paths, rgb_dest_dir, resolution, desc=f"Processing {split} images")
+
+    if resolution == ORIGINAL_RESOLUTION:
+        copy_images(selected_rgb_paths, rgb_dest_dir, desc=f"Copying {split} images")
+    else:
+        copy_and_resize_images(selected_rgb_paths, rgb_dest_dir, resolution, desc=f"Resizing {split} images")
+
     print(f"[{split}] Done.")
 
 def generate_subset():
