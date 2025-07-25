@@ -110,15 +110,10 @@ def validate(model, dataloader, perc_loss_fn, device, device_type, epoch, total_
             with autocast(device_type=device_type):
                 pred_ab = model(L)
                 pred_rgb = lab_to_rgb_torch(L, pred_ab).to(device)
-                perc_loss = perc_loss_fn(pred_rgb, gt_rgb)
-                if mse_weight > 0:
-                    mse_loss = nn.MSELoss()(pred_ab, ab)
-                    loss = mse_weight * mse_loss + perc_weight * perc_loss
-                else:
-                    loss = perc_loss
+                loss = perc_loss_fn(pred_rgb, gt_rgb)
             total_loss += loss.item()
             progress_bar.set_postfix(
-                loss=loss.item(), perc_loss=perc_loss.item())
+                loss=loss.item())
     avg_loss = total_loss / len(dataloader)
     print(f"Epoch {epoch}/{total_epochs} Validation Loss: {avg_loss:.4f}")
     return avg_loss
@@ -157,19 +152,38 @@ def train_model_pipeline():
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scaler = GradScaler()
 
-    mse_weight = 0.0
-    perc_weight = 1.0
+ 
+ 
+
+    epoch_logs = []
 
     for epoch in range(1, epochs + 1):
-        train_one_epoch(model, train_loader, perc_loss_fn, optimizer, device,
-                        device_type, epoch, epochs, scaler, mse_weight, perc_weight)
+        train_start = time.time()
+        train_loss = train_one_epoch(model, train_loader, perc_loss_fn, optimizer, device,
+                        device_type, epoch, epochs, scaler)
+        train_time = time.time() - train_start
         
         checkpoint_path = get_checkpoint_filename(epoch)
         torch.save(model.state_dict(), checkpoint_path)
         print(f"Saved checkpoint: {checkpoint_path}")
 
-        validate(model, val_loader, perc_loss_fn, device,
-                 device_type, epoch, epochs, mse_weight, perc_weight)
+        val_start = time.time()
+        val_loss = validate(model, val_loader, perc_loss_fn, device,
+                 device_type, epoch, epochs)
+        val_time = time.time() - val_start
+
+        epoch_logs.append({
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "train_time": train_time,
+            "val_time": val_time
+        })
+
+        with open("training_metrics.json", "w") as f:
+            json.dump({"epochs": epoch_logs}, f, indent=2)
+    
+    print("Saved all training logs to training_metrics.json")
 
 
 if __name__ == "__main__":
