@@ -10,11 +10,13 @@ from torchvision.utils import save_image
 from skimage.metrics import peak_signal_noise_ratio as compare_psnr
 from skimage.metrics import structural_similarity as compare_ssim
 from model import UNetViT
+from perceptual_loss import VGGPerceptualLoss  
 import cv2
 
 device = (torch.device("cuda") if torch.cuda.is_available()
           else torch.device("mps") if torch.backends.mps.is_available()
           else torch.device("cpu"))
+device_type = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
 
 class ColorizationDataset(Dataset):
     def __init__(self, rgb_dir):
@@ -32,13 +34,11 @@ class ColorizationDataset(Dataset):
         rgb_img = cv2.imread(rgb_path)
         rgb_img = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2RGB)
 
-        
         gray_img = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2GRAY)
         L = gray_img.astype(np.float32) / 255.0 * 100.0
         L = (L / 50.0) - 1.0
         L = L[None, :, :]
 
-        
         lab = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2LAB).astype(np.float32)
         ab = (lab[:,:,1:3] - 128.0) / 128.0
         ab = ab.transpose(2, 0, 1)
@@ -116,48 +116,56 @@ def evaluate_model(checkpoint_path=None,
     model = UNetViT(in_channels=1, out_channels=2, vit_embed_dim=vit_embed_dim, vit_heads=vit_heads).to(device)
     state = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(state)
-
-    metrics = {"MAE": [], "PSNR": [], "SSIM": []}
-
     model.eval()
+
+    perceptual_loss = VGGPerceptualLoss(resize=True).to(device)   
+
+    metrics = {"MAE": [], "PSNR": [], "SSIM": [], "Perceptual": []}
+
     with torch.no_grad():
         for L, ab, fnames in tqdm(test_loader, desc="Evaluating", leave=True):
             L = L.to(device)
-            preds_ab = model(L)
-            for i in range(L.size(0)):
-                pred_ab = preds_ab[i].cpu()
-                input_L = L[i].cpu()
-                fname = fnames[i]
+            with torch.amp.autocast(device_type=device_type): # pyright: ignore[reportPrivateImportUsage]
+                preds_ab = model(L)
+                for i in range(L.size(0)):
+                    pred_ab = preds_ab[i].cpu()
+                    input_L = L[i].cpu()
+                    fname = fnames[i]
 
-                
-                pred_rgb = lab_to_rgb_torch(input_L, pred_ab)
-                save_prediction(pred_rgb, os.path.join(save_dir, fname))
+                    pred_rgb = lab_to_rgb_torch(input_L, pred_ab)
+                    save_prediction(pred_rgb, os.path.join(save_dir, fname))
+                    pred_rgb_tensor = pred_rgb.clamp(0, 1).float()
 
-                pred_rgb_tensor = pred_rgb.clamp(0, 1).float()
+                    gt_path = os.path.join(rgb_test_dir, fname)
+                    gt_rgb = cv2.imread(gt_path)
+                    gt_rgb = cv2.cvtColor(gt_rgb, cv2.COLOR_BGR2RGB)
+                    gt_rgb = np.clip(gt_rgb / 255.0, 0, 1)
+                    gt_rgb = np.transpose(gt_rgb, (2, 0, 1))
+                    gt_rgb_tensor = torch.from_numpy(gt_rgb).float()
 
-                
-                gt_path = os.path.join(rgb_test_dir, fname)
-                gt_rgb = cv2.imread(gt_path)
-                gt_rgb = cv2.cvtColor(gt_rgb, cv2.COLOR_BGR2RGB)
-                gt_rgb = np.clip(gt_rgb / 255.0, 0, 1)
-                gt_rgb = np.transpose(gt_rgb, (2, 0, 1))
-                gt_rgb_tensor = torch.from_numpy(gt_rgb).float()
+                    if pred_rgb_tensor.shape != gt_rgb_tensor.shape:
+                        H, W = gt_rgb_tensor.shape[1:]
+                        pred_rgb_tensor = torch.nn.functional.interpolate(
+                            pred_rgb_tensor.unsqueeze(0), size=(H, W), mode='bilinear', align_corners=False
+                        ).squeeze(0)
 
-                if pred_rgb_tensor.shape != gt_rgb_tensor.shape:
-                    H, W = gt_rgb_tensor.shape[1:]
-                    pred_rgb_tensor = torch.nn.functional.interpolate(
-                        pred_rgb_tensor.unsqueeze(0), size=(H, W), mode='bilinear', align_corners=False
-                    ).squeeze(0)
+                    metrics["MAE"].append(mae_metric(pred_rgb_tensor, gt_rgb_tensor))
+                    metrics["PSNR"].append(psnr_metric(pred_rgb_tensor, gt_rgb_tensor))
+                    metrics["SSIM"].append(ssim_metric(pred_rgb_tensor, gt_rgb_tensor))
 
-                metrics["MAE"].append(mae_metric(pred_rgb_tensor, gt_rgb_tensor))
-                metrics["PSNR"].append(psnr_metric(pred_rgb_tensor, gt_rgb_tensor))
-                metrics["SSIM"].append(ssim_metric(pred_rgb_tensor, gt_rgb_tensor))
+                    metrics["Perceptual"].append(
+                        perceptual_loss(
+                            pred_rgb_tensor.unsqueeze(0).to(device),
+                            gt_rgb_tensor.unsqueeze(0).to(device)
+                        ).cpu().item()
+                    )
 
     avg_metrics = {k: float(np.mean(v)) for k, v in metrics.items()}
     with open(metrics_json, "w") as f:
         json.dump(avg_metrics, f, indent=4)
 
     print("Evaluation complete. Metrics saved to", metrics_json)
+    print("Perceptual Loss (avg):", avg_metrics["Perceptual"])
     return avg_metrics
 
 if __name__ == "__main__":
