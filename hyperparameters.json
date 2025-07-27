@@ -1,11 +1,11 @@
 {
-  "train_size": 50000,
-  "val_size": 10000,
-  "test_size": 20000,
+  "train_size": 20000,
+  "val_size": 1000,
+  "test_size": 5000,
   "resolution": 256,
   "epochs": 25,
   "learning_rate": 0.001,
-  "batch_size": 16,
+  "batch_size": 8,
   "vit_embed_dim": 128,
   "vit_heads": 4
 }

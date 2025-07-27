@@ -98,9 +98,10 @@ def load_hparams(path="hyperparameters.json"):
 
 def evaluate_model(checkpoint_path=None):
     hparams = load_hparams("hyperparameters.json")
-    rgb_test_dir = hparams.get("test_dir", "./data_subset/test")
-    save_dir = hparams.get("pred_dir", "./predictions")
-    metrics_json = hparams.get("metrics_out", "eval_metrics.json")
+    rgb_test_dir = "./data_subset/test"
+    save_dir = "./predictions"
+    metrics_json = "eval_metrics.json"
+
     batch_size = hparams.get("batch_size", 8)
     vit_embed_dim = hparams.get("vit_embed_dim", 128)
     vit_heads = hparams.get("vit_heads", 4)
@@ -177,7 +178,7 @@ def evaluate_model(checkpoint_path=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Evaluate UNetViT colorization model.")
+        description="Evaluate colorization model.")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Path to model checkpoint (.pt). If omitted, latest in ./checkpoints is used.")
     args = parser.parse_args()

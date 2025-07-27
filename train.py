@@ -167,7 +167,7 @@ def train_model_pipeline():
         })
 
         with open("training_metrics.json", "w") as f:
-            json.dump({"epochs": epoch_logs}, f, indent=2)
+            json.dump({"hyperparameters": hparams, "epochs": epoch_logs}, f, indent=2)
     
     print("Saved all training logs to training_metrics.json")
 
