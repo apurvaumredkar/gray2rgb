@@ -1,11 +1,18 @@
 {
   "train_size": 20000,
-  "val_size": 1000,
+  "val_size": 2000,
   "test_size": 5000,
   "resolution": 256,
-  "epochs": 25,
-  "learning_rate": 0.001,
-  "batch_size": 8,
+  "epochs": 50,
+  "batch_size": 16,
+  "num_workers": 8,
   "vit_embed_dim": 128,
-  "vit_heads": 4
+  "vit_heads": 4,
+  "dropout": 0.2,
+  "learning_rate": 1e-3,
+  "weight_decay": 1e-4,
+  "l1_weight": 1.0,
+  "perc_weight": 0.5,
+  "vibrance_weight": 0.5,
+  "vibrance_threshold": 0.5
 }

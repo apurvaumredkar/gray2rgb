@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+
 class ConvBlock(nn.Sequential):
     def __init__(self, in_channels, out_channels):
         super().__init__(
@@ -32,17 +33,18 @@ class ViTBlock(nn.Module):
         x = self.norm1(x)
         x = x + self.mlp(x)
         x = self.norm2(x)
-        x = x.permute(0,2,1).view(B, C, H, W)
+        x = x.permute(0, 2, 1).view(B, C, H, W)
         return x
 
-class UNetViT(nn.Module):
-    def __init__(self, in_channels=1, out_channels=2, vit_embed_dim=128, vit_heads=4):
+class ColorizationNet(nn.Module):
+    def __init__(self, in_channels=1, out_channels=2, dropout=0.1, vit_embed_dim=128, vit_heads=4):
         super().__init__()
         self.enc1 = ConvBlock(in_channels, 32)
         self.pool1 = nn.MaxPool2d(2)
         self.enc2 = ConvBlock(32, 64)
         self.pool2 = nn.MaxPool2d(2)
-        self.enc3 = ConvBlock(64, 128)
+
+        self.enc3 = ConvBlock(32, 64)           # 32→16→32→64
         self.pool3 = nn.MaxPool2d(2)
         self.enc4 = ConvBlock(128, vit_embed_dim)
 
@@ -61,6 +63,7 @@ class UNetViT(nn.Module):
             nn.Conv2d(16, out_channels, 1),
             nn.Tanh()   
         )
+
 
     def forward(self, x):
         e1 = self.enc1(x)
@@ -82,13 +85,16 @@ class UNetViT(nn.Module):
         out = self.final_conv(d2)
         return out
 
+
 if __name__ == "__main__":
     from torchinfo import summary
     import json
+
     with open("hyperparameters.json", "r") as f:
         hparams = json.load(f)
+
     vit_embed_dim = hparams.get("vit_embed_dim", 128)
     vit_heads = hparams.get("vit_heads", 4)
-    model = UNetViT(in_channels=1, out_channels=2,
+    model = ColorizationNet(in_channels=1, out_channels=2,
                     vit_embed_dim=vit_embed_dim, vit_heads=vit_heads)
     print(summary(model, input_size=(1,1,256,256)))
