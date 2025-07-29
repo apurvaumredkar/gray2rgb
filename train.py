@@ -360,7 +360,7 @@ def main():
             print(f"  New best model saved! Val Loss: {val_loss:.4f}")
 
         with open(
-            os.path.join(config["checkpoint_dir"], "training_history.json"), "w"
+            os.path.join("training_history.json"), "w"
         ) as f:
             json.dump({"config": config, "history": history}, f, indent=2)
 
