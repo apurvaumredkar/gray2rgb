@@ -13,39 +13,22 @@ from PIL import Image
 from model import ColorizationNet
 import kornia.color as kc
 import lpips
+import warnings
 
-import os
-from PIL import Image
-from torch.utils.data import Dataset
-import torchvision.transforms as T
-import torch
-import kornia.color as kc
+warnings.filterwarnings("ignore")
 
 
 class ColorizationDataset(Dataset):
-    def __init__(self, rgb_dir, is_train=True):
+    def __init__(self, rgb_dir, resolution=256):
         self.rgb_dir = rgb_dir
+        self.resolution = resolution
         self.filenames = [
-            f for f in os.listdir(rgb_dir)
+            f
+            for f in os.listdir(rgb_dir)
             if f.lower().endswith((".jpg", ".jpeg", ".png"))
         ]
-        self.is_train = is_train
 
-        # Define augmentations
-        if is_train:
-            self.transforms = T.Compose([
-                T.RandomHorizontalFlip(),
-                T.RandomVerticalFlip(),
-                T.RandomRotation(15),
-                T.RandomAffine(degrees=0, translate=(0.05, 0.05)),  # Add tiny translations
-                T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
-                T.ToTensor(),
-                T.RandomErasing(
-                    p=0.2, scale=(0.02, 0.15), ratio=(0.3, 3.3), value=0
-                )
-            ])
-        else:
-            self.transforms = T.ToTensor()
+        self.transform = T.Compose([T.RandomHorizontalFlip(p=0.5), T.ToTensor()])
 
     def __len__(self):
         return len(self.filenames)
@@ -55,251 +38,338 @@ class ColorizationDataset(Dataset):
         rgb_path = os.path.join(self.rgb_dir, filename)
 
         img = Image.open(rgb_path).convert("RGB")
-        img = self.transforms(img)  
-        img = img.unsqueeze(0)    # pyright: ignore[reportAttributeAccessIssue]
-        lab = kc.rgb_to_lab(img)[0]  
+        img = self.transform(img)
+
+        img = img.unsqueeze(0) # pyright: ignore[reportAttributeAccessIssue]
+        lab = kc.rgb_to_lab(img)[0]
+
         L = lab[0:1] / 100.0
-        ab = (lab[1:3] + 128.0) / 127.5 - 1.0
+        ab = lab[1:3] / 110.0
 
         return L, ab
 
 
 def lab_to_rgb_torch(L, ab):
-    lab = torch.cat([(L * 100.0), (ab + 1.0) * 127.5 - 128.0], dim=1)
+    lab = torch.cat([L * 100.0, ab * 110.0], dim=1)
     rgb = kc.lab_to_rgb(lab).clamp(0, 1)
     return rgb
 
 
-def get_checkpoint_filename(epoch, save_dir="checkpoints"):
-    os.makedirs(save_dir, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    filename = f"model_e{epoch}_{timestamp}.pt"
-    return os.path.join(save_dir, filename)
+class ColorLoss(nn.Module):
+    def __init__(
+        self, device, l1_weight=1.0, perceptual_weight=0.3, confidence_weight=0.1
+    ):
+        super().__init__()
+        self.l1_weight = l1_weight
+        self.perceptual_weight = perceptual_weight
+        self.confidence_weight = confidence_weight
+
+        self.l1_loss = nn.L1Loss()
+        self.perceptual_loss = lpips.LPIPS(net="alex").to(device)
+
+    def forward(self, pred_colors, pred_confidence, target_colors, L_channel):
+
+        l1_loss = self.l1_loss(pred_colors, target_colors)
+
+        confidence_loss = torch.mean((1.0 - pred_confidence) ** 2)
+
+        if self.perceptual_weight > 0:
+            pred_rgb = lab_to_rgb_torch(L_channel, pred_colors)
+            target_rgb = lab_to_rgb_torch(L_channel, target_colors)
+
+            perc_loss = self.perceptual_loss(
+                pred_rgb * 2 - 1, target_rgb * 2 - 1
+            ).mean()
+        else:
+            perc_loss = torch.tensor(0.0, device=pred_colors.device)
+
+        weighted_l1 = torch.mean(
+            self.l1_loss(pred_colors, target_colors) * (pred_confidence + 0.1)
+        )
+
+        total_loss = (
+            self.l1_weight * l1_loss
+            + self.perceptual_weight * perc_loss
+            + self.confidence_weight * confidence_loss
+            + 0.5 * weighted_l1
+        )
+
+        return total_loss, {
+            "l1_loss": l1_loss.item(),
+            "perceptual_loss": (
+                perc_loss.item() if isinstance(perc_loss, torch.Tensor) else 0.0
+            ),
+            "confidence_loss": confidence_loss.item(),
+            "weighted_l1": weighted_l1.item(),
+        }
 
 
 def train_one_epoch(
-    model,
-    dataloader,
-    l1_loss_fn,
-    perc_loss_fn,
-    l1_weight,
-    perc_weight,
-    vibrance_weight,
-    vibrance_threshold,
-    optimizer,
-    device,
-    epoch,
-    total_epochs,
-    autocast_ctx,
-    scaler,
+    model, dataloader, criterion, optimizer, device, scaler, epoch, total_epochs
 ):
     model.train()
     total_loss = 0
+    loss_components = {
+        "l1_loss": 0,
+        "perceptual_loss": 0,
+        "confidence_loss": 0,
+        "weighted_l1": 0,
+    }
+
     progress_bar = tqdm(
         dataloader, desc=f"Epoch {epoch}/{total_epochs} [Training]", leave=False
     )
-    for L, ab in progress_bar:
+
+    for batch_idx, (L, ab) in enumerate(progress_bar):
         L, ab = L.to(device), ab.to(device)
+
         optimizer.zero_grad()
-        with autocast_ctx:
-            pred_ab = model(L)
-            # L1 loss
-            loss_l1 = l1_loss_fn(pred_ab, ab)
 
-            # Vibrance loss: penalize dull ab regions
-            saturation = torch.sqrt(pred_ab[:, 0] ** 2 + pred_ab[:, 1] ** 2 + 1e-6)
-            vibrance_loss = torch.mean((vibrance_threshold - saturation).clamp(min=0.0))
+        with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu"):
+            pred_ab, pred_confidence = model(L)
+            loss, components = criterion(pred_ab, pred_confidence, ab, L)
 
-            # Perceptual loss
-            pred_rgb = lab_to_rgb_torch(L, pred_ab)
-            gt_rgb = lab_to_rgb_torch(L, ab)
-            loss_perc = perc_loss_fn(pred_rgb * 2 - 1, gt_rgb * 2 - 1).mean()
-            
-            # Total loss
-            loss = l1_weight * loss_l1 + perc_weight * loss_perc + vibrance_weight * vibrance_loss
-
-        
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
 
         total_loss += loss.item()
-        progress_bar.set_postfix(loss=loss.item())
+        for key in loss_components:
+            loss_components[key] = loss_components[key] + components[key]
+
+        progress_bar.set_postfix(
+            {
+                "loss": f"{loss.item():.4f}",
+                "l1": f'{components["l1_loss"]:.4f}',
+                "perc": f'{components["perceptual_loss"]:.4f}',
+            }
+        )
+
     avg_loss = total_loss / len(dataloader)
-    print(f"Epoch {epoch}/{total_epochs} Training Loss: {avg_loss:.4f}")
-    return avg_loss
+    for key in loss_components:
+        loss_components[key] = loss_components[key] / len(dataloader) # pyright: ignore[reportArgumentType]
+
+    return avg_loss, loss_components
 
 
-def validate(
-    model,
-    dataloader,
-    l1_loss_fn,
-    perc_loss_fn,
-    l1_weight,
-    perc_weight,
-    device,
-    epoch,
-    total_epochs,
-    autocast_ctx,
-):
+def validate(model, dataloader, criterion, device, epoch, total_epochs):
     model.eval()
     total_loss = 0
+    loss_components = {
+        "l1_loss": 0,
+        "perceptual_loss": 0,
+        "confidence_loss": 0,
+        "weighted_l1": 0,
+    }
+
     with torch.no_grad():
         progress_bar = tqdm(
             dataloader, desc=f"Epoch {epoch}/{total_epochs} [Validation]", leave=False
         )
+
         for L, ab in progress_bar:
             L, ab = L.to(device), ab.to(device)
-            with autocast_ctx:
-                pred_ab = model(L)
-                loss_l1 = l1_loss_fn(pred_ab, ab)
-                pred_rgb = lab_to_rgb_torch(L, pred_ab)
-                gt_rgb = lab_to_rgb_torch(L, ab)
-                loss_perc = perc_loss_fn(pred_rgb * 2 - 1, gt_rgb * 2 - 1).mean()
-                loss = l1_weight * loss_l1 + perc_weight * loss_perc
+
+            with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu"):
+                pred_ab, pred_confidence = model(L)
+                loss, components = criterion(pred_ab, pred_confidence, ab, L)
+
             total_loss += loss.item()
-            progress_bar.set_postfix(loss=loss.item())
+            for key in loss_components:
+                loss_components[key] += components[key]
+
+            progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+
     avg_loss = total_loss / len(dataloader)
-    print(f"Epoch {epoch}/{total_epochs} Validation Loss: {avg_loss:.4f}")
-    return avg_loss
+    for key in loss_components:
+        loss_components[key] = loss_components[key] / len(dataloader) # pyright: ignore[reportArgumentType]
+
+    return avg_loss, loss_components
 
 
-def train_model_pipeline():
-    with open("hyperparameters.json", "r") as f:
-        hparams = json.load(f)
+def save_checkpoint(model, optimizer, epoch, loss, filepath):
+    """Save model checkpoint"""
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "loss": loss,
+    }
+    torch.save(checkpoint, filepath)
 
-    vit_embed_dim = hparams.get("vit_embed_dim", 128)
-    vit_heads = hparams.get("vit_heads", 4)
-    epochs = hparams.get("epochs", 10)
-    batch_size = hparams.get("batch_size", 8)
-    lr = hparams.get("learning_rate", 1e-3)
-    wd = hparams.get("weight_decay", 1e-4)
-    n_workers = int(hparams.get("num_workers", 4))
-    dropout = hparams.get("dropout", 0.2)
-    l1_weight = hparams.get("l1_weight", 1.0)
-    perc_weight = hparams.get("perc_weight", 0.1)
-    vibrance_weight = hparams.get("vibrance_weight", 0.1)
-    vibrance_threshold = hparams.get("vibrance_threshold", 0.3)
 
-    rgb_train_dir = "./data_subset/train"
-    rgb_val_dir = "./data_subset/val"
+def load_checkpoint(model, optimizer, filepath, device):
+    """Load model checkpoint"""
+    checkpoint = torch.load(filepath, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    epoch = checkpoint["epoch"]
+    loss = checkpoint["loss"]
+    return epoch, loss
+
+
+def main():
+
+    try:
+        with open("hyperparameters.json", "r") as f:
+            hparams = json.load(f)
+    except FileNotFoundError:
+        print("hyperparameters.json not found, using defaults")
+        hparams = {}
+
+    config = {
+        "resolution": hparams.get("resolution", 256),
+        "batch_size": hparams.get("batch_size", 8),
+        "learning_rate": hparams.get("learning_rate", 1e-4),
+        "weight_decay": hparams.get("weight_decay", 1e-5),
+        "epochs": hparams.get("epochs", 100),
+        "num_workers": hparams.get("num_workers", 4),
+        "dropout": hparams.get("dropout", 0.15),
+        "vit_embed_dim": hparams.get("vit_embed_dim", 256),
+        "vit_heads": hparams.get("vit_heads", 8),
+        "num_vit_layers": hparams.get("num_vit_layers", 2),
+        "l1_weight": hparams.get("l1_weight", 1.0),
+        "perceptual_weight": hparams.get("perceptual_weight", 0.3),
+        "confidence_weight": hparams.get("confidence_weight", 0.1),
+        "train_dir": hparams.get("train_dir", "./data_subset/train"),
+        "val_dir": hparams.get("val_dir", "./data_subset/val"),
+        "checkpoint_dir": hparams.get("checkpoint_dir", "./checkpoints"),
+        "resume_from": hparams.get("resume_from", None),
+    }
 
     SEED = 42
     random.seed(SEED)
     np.random.seed(SEED)
     torch.manual_seed(SEED)
-
     if torch.cuda.is_available():
-        device = torch.device("cuda")
-        device_type = "cuda"
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-        device_type = "mps"
-    else:
-        device = torch.device("cpu")
-        device_type = "cpu"
+        torch.cuda.manual_seed(SEED)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    autocast_ctx = torch.autocast(device_type=device_type)
-    scaler = torch.GradScaler(device=device_type)
+
+    os.makedirs(config["checkpoint_dir"], exist_ok=True)
 
     model = ColorizationNet(
         in_channels=1,
         out_channels=2,
-        vit_embed_dim=vit_embed_dim,
-        vit_heads=vit_heads,
-        dropout=dropout,
+        dropout=config["dropout"],
+        vit_embed_dim=config["vit_embed_dim"],
+        vit_heads=config["vit_heads"],
+        num_vit_layers=config["num_vit_layers"],
     ).to(device)
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=5, min_lr=1e-6)
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=config["learning_rate"],
+        weight_decay=config["weight_decay"],
+    )
 
-    train_dataset = ColorizationDataset(rgb_train_dir, is_train=True)
-    val_dataset = ColorizationDataset(rgb_val_dir, is_train=False)
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=20, T_mult=2, eta_min=1e-6
+    )
+
+    criterion = ColorLoss(
+        device=device,
+        l1_weight=config["l1_weight"],
+        perceptual_weight=config["perceptual_weight"],
+        confidence_weight=config["confidence_weight"],
+    )
+
+    train_dataset = ColorizationDataset(config["train_dir"], config["resolution"])
+    val_dataset = ColorizationDataset(config["val_dir"], config["resolution"])
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
-        num_workers=n_workers,
+        batch_size=config["batch_size"],
         shuffle=True,
+        num_workers=config["num_workers"],
         pin_memory=True,
-        persistent_workers=True,
+        persistent_workers=True if config["num_workers"] > 0 else False,
     )
+
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
-        num_workers=n_workers,
+        batch_size=config["batch_size"],
         shuffle=False,
+        num_workers=config["num_workers"],
         pin_memory=True,
-        persistent_workers=True,
+        persistent_workers=True if config["num_workers"] > 0 else False,
     )
 
-    l1_loss_fn = nn.L1Loss()
-    perc_loss_fn = lpips.LPIPS(net='alex').to(device)
+    scaler = torch.GradScaler()
 
-    epoch_logs = []
+    start_epoch = 1
+    if config.get("resume_from") and os.path.exists(config["resume_from"]):
+        print(f"Resuming training from {config['resume_from']}")
+        start_epoch, _ = load_checkpoint(
+            model, optimizer, config["resume_from"], device
+        )
+        start_epoch += 1
+    else:
+        print("Starting training from scratch")
 
-    torch.backends.cudnn.benchmark = True
+    history = {
+        "train_loss": [],
+        "val_loss": [],
+        "train_components": [],
+        "val_components": [],
+    }
 
-    for epoch in range(1, epochs + 1):
-        train_start = time.time()
-        train_loss = train_one_epoch(
+    best_val_loss = float("inf")
+
+    print(f"Starting training for {config['epochs']} epochs")
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    for epoch in range(start_epoch, config["epochs"] + 1):
+
+        train_loss, train_components = train_one_epoch(
             model,
             train_loader,
-            l1_loss_fn,
-            perc_loss_fn,
-            l1_weight,
-            perc_weight,
-            vibrance_weight,
-            vibrance_threshold,
+            criterion,
             optimizer,
             device,
-            epoch,
-            epochs,
-            autocast_ctx,
             scaler,
-        )
-        train_time = time.time() - train_start
-
-        checkpoint_path = get_checkpoint_filename(epoch)
-        torch.save(model.state_dict(), checkpoint_path)
-        print(f"Saved checkpoint: {checkpoint_path}")
-
-        val_start = time.time()
-        val_loss = validate(
-            model,
-            val_loader,
-            l1_loss_fn,
-            perc_loss_fn,
-            l1_weight,
-            perc_weight,
-            device,
             epoch,
-            epochs,
-            autocast_ctx,
+            config["epochs"],
         )
-        val_time = time.time() - val_start
 
-        scheduler.step(val_loss)
+        val_loss, val_components = validate(
+            model, val_loader, criterion, device, epoch, config["epochs"]
+        )
+
+        scheduler.step()
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["train_components"].append(train_components)
+        history["val_components"].append(val_components)
+
+        print(f"Epoch {epoch}/{config['epochs']}:")
+        print(f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        print(f"  LR: {scheduler.get_last_lr()[0]:.6f}")
+
+        checkpoint_path = os.path.join(
+            config["checkpoint_dir"], f"checkpoint_epoch_{epoch:03d}.pt"
+        )
+        save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_path = os.path.join(config["checkpoint_dir"], "best_model.pt")
+            save_checkpoint(model, optimizer, epoch, val_loss, best_path)
+            print(f"  New best model saved! Val Loss: {val_loss:.4f}")
+
+        with open(
+            os.path.join(config["checkpoint_dir"], "training_history.json"), "w"
+        ) as f:
+            json.dump({"config": config, "history": history}, f, indent=2)
 
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-        epoch_logs.append(
-            {
-                "epoch": epoch,
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "train_time": train_time,
-                "val_time": val_time,
-            }
-        )
-
-        with open("training_metrics.json", "w") as f:
-            json.dump({"hyperparameters": hparams, "epochs": epoch_logs}, f, indent=2)
-
-    print("Training logs saved to training_metrics.json")
+    print("Training completed!")
+    print(f"Best validation loss: {best_val_loss:.4f}")
 
 
 if __name__ == "__main__":
-    train_model_pipeline()
+    main()

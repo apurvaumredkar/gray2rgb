@@ -2,6 +2,7 @@
 places365/
 data_subset/
 predictions/
+checkpoints/
 
 *.zip
 

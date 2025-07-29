@@ -1,0 +1,10 @@
+{
+    "RGB_MAE": 0.04353056084527634,
+    "RGB_PSNR": 24.82008883377697,
+    "RGB_SSIM": 0.9415574073791504,
+    "AB_MAE": 0.07168781410572118,
+    "Saturation_Diff": 0.0865663839155808,
+    "Confidence_Mean": 0.827986328125,
+    "Total_Images": 5000,
+    "Checkpoint": "best_model.pt"
+}
