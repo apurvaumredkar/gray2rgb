@@ -1,229 +1,241 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import timm
+import json
+from torchinfo import summary
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, dropout=0.1):
-        super().__init__()
-        mid_channels = out_channels // 2
-        self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1)
-        self.gn1 = nn.GroupNorm(num_groups=min(8, mid_channels), num_channels=mid_channels)
-        self.act1 = nn.LeakyReLU(0.01, inplace=True)
 
-        self.conv2 = nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1)
-        self.gn2 = nn.GroupNorm(num_groups=min(8, out_channels), num_channels=out_channels)
-        self.act2 = nn.LeakyReLU(0.01, inplace=True)
-
-        self.dropout = nn.Dropout2d(dropout)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.gn1(x)
-        x = self.act1(x)
-
-        x = self.conv2(x)
-        x = self.gn2(x)
-        x = self.act2(x)
-
-        x = self.dropout(x)
-        return x
-
-class ViTBlock(nn.Module):
-    def __init__(self, embed_dim, num_heads, dropout=0.1):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim * 4, embed_dim),
-            nn.Dropout(dropout)
-        )
-        self.dropout = nn.Dropout(dropout)
+class EncoderBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(EncoderBlock, self).__init__()
+        self.conv_block = nn.Sequential(
+                            nn.Conv2d(in_channels, out_channels // 2, kernel_size=3, padding=1),
+                            nn.GroupNorm(8, out_channels // 2),
+                            nn.LeakyReLU(0.01, inplace=True),
+                            nn.Conv2d(out_channels // 2, out_channels, kernel_size=3, padding=1),
+                            nn.GroupNorm(8, out_channels),
+                            nn.LeakyReLU(0.01, inplace=True),
+                        )
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
     def forward(self, x):
-        B, C, H, W = x.shape
-        x_flat = x.flatten(2).permute(0, 2, 1)  
-        
-        # Self-attention with residual
-        attn_out, _ = self.attn(x_flat, x_flat, x_flat)
-        x = self.norm1(x_flat + self.dropout(attn_out))
-        
-        # MLP with residual
-        mlp_out = self.mlp(x)
-        x = self.norm2(x + mlp_out)
-        
-        x = x.permute(0, 2, 1).view(B, C, H, W)
-        return x
+        features = self.conv_block(x)
+        pooled = self.pool(features)
+        return pooled, features
 
+
+class DecoderBlock(nn.Module):
+    def __init__(self, in_channels, skip_channels, out_channels):
+        super(DecoderBlock, self).__init__()
+        self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+        self.ag = AttentionGate(F_g=in_channels // 2, F_l=skip_channels, F_int=in_channels // 4)
+
+        conv_in_channels = in_channels // 2 + skip_channels
+        
+        self.conv_block = nn.Sequential(
+                            nn.Conv2d(conv_in_channels, out_channels // 2, kernel_size=3, padding=1),
+                            nn.GroupNorm(8, out_channels // 2),
+                            nn.LeakyReLU(0.01, inplace=True),
+                            nn.Conv2d(out_channels // 2, out_channels, kernel_size=3, padding=1),
+                            nn.GroupNorm(8, out_channels),
+                            nn.LeakyReLU(0.01, inplace=True),
+                        )
+
+    def forward(self, x, skip):
+        x = self.up(x)
+        skip = self.ag(x, skip)
+        x = torch.cat([x, skip], dim=1)
+        x = self.conv_block(x)
+        return x
+    
 class AttentionGate(nn.Module):
-    """Attention gate for skip connections to reduce redundant features"""
-    def __init__(self, gate_channels, skip_channels, inter_channels):
-        super().__init__()
-        self.gate_conv = nn.Conv2d(gate_channels, inter_channels, kernel_size=1)
-        self.skip_conv = nn.Conv2d(skip_channels, inter_channels, kernel_size=1)
-        self.attention_conv = nn.Conv2d(inter_channels, 1, kernel_size=1)
-        
-    def forward(self, gate, skip):
-        g = self.gate_conv(gate)
-        s = self.skip_conv(skip)
-        attention = torch.sigmoid(self.attention_conv(F.relu(g + s)))
-        return skip * attention
+    def __init__(self, F_g, F_l, F_int):
+        super(AttentionGate, self).__init__()
 
-class AdaptiveInstanceNorm(nn.Module):
-    """Adaptive Instance Normalization for style transfer capabilities"""
-    def __init__(self, num_features):
-        super().__init__()
-        self.norm = nn.InstanceNorm2d(num_features, affine=False)
-        
-    def forward(self, x):
-        return self.norm(x)
+        self.W_g = nn.Sequential(
+                    nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
+                    nn.GroupNorm(8, F_int),
+                )
+        self.W_x = nn.Sequential(
+                    nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
+                    nn.GroupNorm(8, F_int),
+                )
+        self.psi = nn.Sequential(
+                    nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
+                    nn.GroupNorm(1, 1),
+                    nn.Sigmoid(),
+                )
+        self.relu = nn.LeakyReLU(0.01, inplace=True)
 
-class ColorizationNet(nn.Module):
-    def __init__(self, in_channels=1, out_channels=2, dropout=0.1, 
-                 vit_embed_dim=128, vit_heads=8, num_vit_layers=3):
-        super().__init__()
+    def forward(self, g, x):
+        g1 = self.W_g(g)
+        x1 = self.W_x(x)
+        psi = self.relu(g1 + x1)
+        psi = self.psi(psi)
+        return x * psi
 
-        # Encoder with residual connections
-        self.enc1 = ConvBlock(in_channels, 32, dropout)    
-        self.pool1 = nn.MaxPool2d(2)
 
-        self.enc2 = ConvBlock(32, 64, dropout)             
-        self.pool2 = nn.MaxPool2d(2)
+class ViTUNetColorizer(nn.Module):
+    def __init__(self, vit_model_name="vit_tiny_patch16_224", freeze_vit_epochs=10):
+        super(ViTUNetColorizer, self).__init__()
 
-        self.enc3 = ConvBlock(64, 128, dropout)             
-        self.pool3 = nn.MaxPool2d(2)
+        self.vit = timm.create_model(vit_model_name, pretrained=True, num_classes=0)
+        self.vit_embed_dim = self.vit.embed_dim
+        self.vit.head = nn.Identity()
 
-        # Bridge to ViT
-        self.enc4 = nn.Sequential(
-            nn.Conv2d(128, vit_embed_dim, kernel_size=3, padding=1),
-            nn.GroupNorm(min(8, vit_embed_dim), vit_embed_dim),
-            nn.LeakyReLU(0.01, inplace=True)
+        self.enc1 = EncoderBlock(1, 32)
+        self.enc2 = EncoderBlock(32, 64)
+        self.enc3 = EncoderBlock(64, 128)
+        self.enc4 = EncoderBlock(128, 256)
+
+        self.bottleneck_processor = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 256),
+            nn.LeakyReLU(0.01, inplace=True),
+            nn.AdaptiveAvgPool2d((14, 14)),
         )
 
-        # Multiple ViT blocks for better global understanding
-        self.vit_layers = nn.ModuleList([
-            ViTBlock(vit_embed_dim, vit_heads, dropout) 
-            for _ in range(num_vit_layers)
-        ])
+        self.fusion_layer = nn.Sequential(
+            nn.Conv2d(256 + self.vit_embed_dim, 256, kernel_size=1), # type: ignore
+            nn.GroupNorm(8, 256),
+            nn.LeakyReLU(0.01, inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 256),
+            nn.LeakyReLU(0.01, inplace=True),
+        )
 
-        # Attention gates for skip connections
-        self.att_gate3 = AttentionGate(128, 128, 64)  # Fixed: both inputs are 128 channels
-        self.att_gate2 = AttentionGate(64, 64, 32)    # Fixed: both inputs are 64 channels  
-        self.att_gate1 = AttentionGate(32, 32, 16)    # Fixed: both inputs are 32 channels
+        self.dec4 = DecoderBlock(256, 128, 128)
+        self.dec3 = DecoderBlock(128, 64, 64)
+        self.dec2 = DecoderBlock(64, 32, 32)
 
-        # Decoder with attention gates
-        self.up3 = nn.ConvTranspose2d(vit_embed_dim, 128, kernel_size=2, stride=2)
-        self.dec3 = ConvBlock(128 + 128, 128, dropout)
-
-        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec2 = ConvBlock(64 + 64, 64, dropout)
-
-        self.up1 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.dec1 = ConvBlock(32 + 32, 32, dropout)
-
-        # Enhanced final layers with multiple outputs
         self.final_conv = nn.Sequential(
             nn.Conv2d(32, 16, kernel_size=3, padding=1),
             nn.GroupNorm(8, 16),
             nn.LeakyReLU(0.01, inplace=True),
-            nn.Conv2d(16, 8, kernel_size=3, padding=1),
-            nn.GroupNorm(8, 8),
-            nn.LeakyReLU(0.01, inplace=True),
+            nn.Conv2d(16, 2, kernel_size=1),
+            nn.Tanh(),
         )
-        
-        # Separate heads for different aspects
-        self.color_head = nn.Conv2d(8, out_channels, kernel_size=1)
-        self.confidence_head = nn.Conv2d(8, 1, kernel_size=1)
-        
-        # Adaptive normalization for final output
-        self.adaptive_norm = AdaptiveInstanceNorm(out_channels)
+
+        self.freeze_vit_epochs = freeze_vit_epochs
+        self.current_epoch = 0
+
+    def extract_vit_features(self, x):
+        B = x.shape[0]
+        x_3ch = x.repeat(1, 3, 1, 1)
+
+        if x_3ch.shape[-1] != 224:
+            x_3ch = F.interpolate(
+                x_3ch, size=(224, 224), mode="bicubic", align_corners=False
+            )
+
+        x_vit = self.vit.patch_embed(x_3ch) # type: ignore
+        if hasattr(self.vit, 'pos_embed') and self.vit.pos_embed is not None:
+            x_vit = x_vit + self.vit.pos_embed[:, 1:, :] # type: ignore
+        x_vit = self.vit.pos_drop(x_vit) # type: ignore
+
+        for block in self.vit.blocks: # type: ignore
+            x_vit = block(x_vit)
+
+        x_vit = self.vit.norm(x_vit) # type: ignore
+        x_vit = x_vit.transpose(1, 2).reshape(B, self.vit_embed_dim, 14, 14)
+
+        return x_vit
 
     def forward(self, x):
-        # Encoder
-        e1 = self.enc1(x)
-        p1 = self.pool1(e1)
 
-        e2 = self.enc2(p1)
-        p2 = self.pool2(e2)
+        x1, skip1 = self.enc1(x)
+        x2, skip2 = self.enc2(x1)
+        x3, skip3 = self.enc3(x2)
+        x4, skip4 = self.enc4(x3)
 
-        e3 = self.enc3(p2)
-        p3 = self.pool3(e3)
+        bottleneck = self.bottleneck_processor(x4)
+        vit_features = self.extract_vit_features(x)
+        fused = torch.cat([bottleneck, vit_features], dim=1)
+        fused = self.fusion_layer(fused)
 
-        e4 = self.enc4(p3)
+        fused = F.interpolate(fused, size=x3.shape[2:], mode="bilinear", align_corners=False)
 
-        # Multiple ViT layers for better global context
-        vit_out = e4
-        for vit_layer in self.vit_layers:
-            vit_out = vit_layer(vit_out)
+        d4 = self.dec4(fused, skip3)
+        d3 = self.dec3(d4, skip2)
+        d2 = self.dec2(d3, skip1)
 
-        # Decoder with attention gates
-        d3 = self.up3(vit_out)
-        e3_att = self.att_gate3(d3, e3)  # Both d3 and e3 are 128 channels
-        d3 = self.dec3(torch.cat([d3, e3_att], dim=1))
+        out = self.final_conv(d2)
 
-        d2 = self.up2(d3)
-        e2_att = self.att_gate2(d2, e2)  # Both d2 and e2 are 64 channels
-        d2 = self.dec2(torch.cat([d2, e2_att], dim=1))
+        return out
 
-        d1 = self.up1(d2)
-        e1_att = self.att_gate1(d1, e1)  # Both d1 and e1 are 32 channels
-        d1 = self.dec1(torch.cat([d1, e1_att], dim=1))
+    def set_epoch(self, epoch):
+        self.current_epoch = epoch
+        requires_grad = epoch >= self.freeze_vit_epochs
+        for param in self.vit.parameters():
+            param.requires_grad = requires_grad
 
-        # Final processing
-        features = self.final_conv(d1)
-        
-        # Color prediction
-        colors = self.color_head(features)
-        colors = torch.tanh(colors) * 1.2  # Slightly expand range
-        
-        # Confidence prediction for uncertainty-aware training
-        confidence = torch.sigmoid(self.confidence_head(features))
-        
-        return colors, confidence
+    def get_param_groups(self, lr_decoder=1e-4, lr_vit=1e-5):
+        vit_params = []
+        decoder_params = []
+        for name, param in self.named_parameters():
+            if "vit" in name:
+                vit_params.append(param)
+            else:
+                decoder_params.append(param)
+        return [
+            {"params": decoder_params, "lr": lr_decoder},
+            {"params": vit_params, "lr": lr_vit},
+        ]
 
+
+class PatchDiscriminator(nn.Module):
+    def __init__(self, in_channels=3, n_filters=48):
+        super(PatchDiscriminator, self).__init__()
+
+        def discriminator_block(in_filters, out_filters, stride=2, normalize=True):
+            layers = [
+                nn.Conv2d(
+                    in_filters, out_filters, kernel_size=4, stride=stride, padding=1
+                )
+            ]
+            if normalize:
+                layers.append(nn.GroupNorm(8, out_filters)) # type: ignore
+            layers.append(nn.LeakyReLU(0.2, inplace=True)) # type: ignore
+            return layers
+
+        self.model = nn.Sequential(
+            *discriminator_block(in_channels, n_filters, normalize=False),
+            *discriminator_block(n_filters, n_filters * 2),
+            *discriminator_block(n_filters * 2, n_filters * 4),
+            nn.Conv2d(n_filters * 4, 1, kernel_size=4, padding=1)
+        )
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+            nn.init.normal_(m.weight, 0.0, 0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.GroupNorm):
+            if m.weight is not None:
+                nn.init.normal_(m.weight, 1.0, 0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, L, ab):
+        img_input = torch.cat((L, ab), dim=1)
+        return self.model(img_input)
 
 
 if __name__ == "__main__":
-    from torchinfo import summary
-    import json
-
-    # Default hyperparameters for RTX 4070 laptop
-    default_hparams = {
-        "resolution": 256,
-        "batch_size": 8,
-        "learning_rate": 1e-4,
-        "dropout": 0.15,
-        "vit_embed_dim": 256,
-        "vit_heads": 8,
-        "num_vit_layers": 2,
-        "weight_decay": 1e-5,
-        "scheduler": "cosine",
-        "warmup_epochs": 5,
-        "total_epochs": 100
-    }
-
     try:
         with open("hyperparameters.json", "r") as f:
             hparams = json.load(f)
+        resolution = hparams.get("resolution", 256)
     except FileNotFoundError:
-        hparams = default_hparams
-        print("Using default hyperparameters")
+        resolution = 256
+        print("Using default resolution: 256x256")
 
-    # Update with defaults if keys missing
-    for key, value in default_hparams.items():
-        hparams.setdefault(key, value)
-
-    model = ColorizationNet(
-        in_channels=1,
-        out_channels=2,
-        dropout=hparams["dropout"],
-        vit_embed_dim=hparams["vit_embed_dim"],
-        vit_heads=hparams["vit_heads"],
-        num_vit_layers=hparams["num_vit_layers"]
-    )
-
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(summary(model, input_size=(hparams["batch_size"], 1, hparams["resolution"], hparams["resolution"])))
+    generator = ViTUNetColorizer()
+    generator_input_size = (1, 1, resolution, resolution)
+    summary(generator, input_size=generator_input_size)
+    
+    discriminator = PatchDiscriminator()
+    discriminator_input_size = [(1, 1, resolution, resolution), (1, 2, resolution, resolution)]
+    summary(discriminator, input_size=discriminator_input_size)
