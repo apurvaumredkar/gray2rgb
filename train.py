@@ -405,6 +405,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    torch.backends.cudnn.benchmark = True
+
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
 
     try:

@@ -84,36 +84,36 @@ class ViTUNetColorizer(nn.Module):
         self.vit_embed_dim = self.vit.embed_dim
         self.vit.head = nn.Identity()
 
-        self.enc1 = EncoderBlock(1, 32)
-        self.enc2 = EncoderBlock(32, 64)
-        self.enc3 = EncoderBlock(64, 128)
-        self.enc4 = EncoderBlock(128, 256)
+        self.enc1 = EncoderBlock(1, 16)
+        self.enc2 = EncoderBlock(16, 32)
+        self.enc3 = EncoderBlock(32, 64)
+        self.enc4 = EncoderBlock(64, 128)
 
         self.bottleneck_processor = nn.Sequential(
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.GroupNorm(8, 256),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 128),
             nn.LeakyReLU(0.01, inplace=True),
             nn.AdaptiveAvgPool2d((14, 14)),
         )
 
         self.fusion_layer = nn.Sequential(
-            nn.Conv2d(256 + self.vit_embed_dim, 256, kernel_size=1), # type: ignore
-            nn.GroupNorm(8, 256),
+            nn.Conv2d(128 + self.vit_embed_dim, 128, kernel_size=1), # type: ignore
+            nn.GroupNorm(8, 128),
             nn.LeakyReLU(0.01, inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.GroupNorm(8, 256),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 128),
             nn.LeakyReLU(0.01, inplace=True),
         )
 
-        self.dec4 = DecoderBlock(256, 128, 128)
-        self.dec3 = DecoderBlock(128, 64, 64)
-        self.dec2 = DecoderBlock(64, 32, 32)
+        self.dec4 = DecoderBlock(128, 64, 64)
+        self.dec3 = DecoderBlock(64, 32, 32)
+        self.dec2 = DecoderBlock(32, 16, 16)
 
         self.final_conv = nn.Sequential(
-            nn.Conv2d(32, 16, kernel_size=3, padding=1),
-            nn.GroupNorm(8, 16),
+            nn.Conv2d(16, 8, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 8),
             nn.LeakyReLU(0.01, inplace=True),
-            nn.Conv2d(16, 2, kernel_size=1),
+            nn.Conv2d(8, 2, kernel_size=1),
             nn.Tanh(),
         )
 
@@ -185,7 +185,7 @@ class ViTUNetColorizer(nn.Module):
 
 
 class PatchDiscriminator(nn.Module):
-    def __init__(self, in_channels=3, n_filters=48):
+    def __init__(self, in_channels=3, n_filters=32):
         super(PatchDiscriminator, self).__init__()
 
         def discriminator_block(in_filters, out_filters, stride=2, normalize=True):
