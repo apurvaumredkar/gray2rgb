@@ -10,7 +10,7 @@ from torchvision.utils import save_image
 import torchvision.transforms as T
 from skimage.metrics import peak_signal_noise_ratio as compare_psnr
 from skimage.metrics import structural_similarity as compare_ssim
-from model import ColorizationNet
+from model import ViTUNetColorizer
 from PIL import Image
 import kornia.color as kc
 
@@ -55,27 +55,21 @@ def find_best_checkpoint(ckpt_dir="checkpoints"):
 def load_checkpoint(checkpoint_path, model, device):
     """Load model from checkpoint"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    if "model_state_dict" in checkpoint:
-
-        model.load_state_dict(checkpoint["model_state_dict"])
+    if "generator_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["generator_state_dict"])
         epoch = checkpoint.get("epoch", 0)
         loss = checkpoint.get("loss", 0)
         print(f"Loaded checkpoint from epoch {epoch} with loss {loss:.4f}")
     else:
-
         model.load_state_dict(checkpoint)
-        print("Loaded checkpoint (legacy format)")
+        print("Loaded checkpoint (state_dict only)")
 
 
 def load_hparams(path="hyperparameters.json"):
     """Load hyperparameters with defaults"""
     defaults = {
-        "batch_size": 8,
+        "batch_size": 16,
         "resolution": 256,
-        "vit_embed_dim": 256,
-        "vit_heads": 8,
-        "num_vit_layers": 2,
-        "dropout": 0.15,
         "num_workers": 4,
     }
 
@@ -93,16 +87,14 @@ def load_hparams(path="hyperparameters.json"):
 
 
 class ColorizationDataset(Dataset):
-    def __init__(self, rgb_dir, resolution=256):
+
+    def __init__(self, rgb_dir):
         self.rgb_dir = rgb_dir
-        self.resolution = resolution
         self.filenames = [
             f
             for f in os.listdir(rgb_dir)
             if f.lower().endswith((".jpg", ".jpeg", ".png"))
         ]
-
-        self.transform = T.Compose([T.ToTensor()])
 
     def __len__(self):
         return len(self.filenames)
@@ -112,56 +104,49 @@ class ColorizationDataset(Dataset):
         rgb_path = os.path.join(self.rgb_dir, filename)
 
         img = Image.open(rgb_path).convert("RGB")
-        img = self.transform(img)
 
-        img = img.unsqueeze(0) # type: ignore
+        img = T.ToTensor()(img)
+
+        img = img.unsqueeze(0)
         lab = kc.rgb_to_lab(img)[0]
+
         L = lab[0:1] / 100.0
         ab = lab[1:3] / 110.0
-
         return L, ab, filename
 
 
 def mae_metric(pred, target):
-    """Mean Absolute Error"""
     return torch.mean(torch.abs(pred - target)).item()
 
 
 def psnr_metric(pred, target):
-    """Peak Signal-to-Noise Ratio"""
     pred_np = pred.cpu().numpy().transpose(1, 2, 0)
     target_np = target.cpu().numpy().transpose(1, 2, 0)
     return compare_psnr(target_np, pred_np, data_range=1.0)
 
 
 def ssim_metric(pred, target):
-    """Structural Similarity Index"""
     pred_np = pred.cpu().numpy().transpose(1, 2, 0)
     target_np = target.cpu().numpy().transpose(1, 2, 0)
+    win_size = min(7, pred_np.shape[0], pred_np.shape[1])
+    if win_size % 2 == 0:
+        win_size -= 1
 
-    if pred_np.shape[2] == 1:
-        return compare_ssim(target_np[:, :, 0], pred_np[:, :, 0], data_range=1.0)
-    else:
-        return compare_ssim(
-            target_np, pred_np, channel_axis=2, data_range=1.0, win_size=7
-        )
+    return compare_ssim(
+        target_np, pred_np, channel_axis=2, data_range=1.0, win_size=win_size
+    )
 
 
 def calculate_color_metrics(pred_ab, target_ab):
-    """Calculate color-specific metrics on AB channels"""
     mae_ab = mae_metric(pred_ab, target_ab)
-
     pred_sat = torch.sqrt(pred_ab[0] ** 2 + pred_ab[1] ** 2)
     target_sat = torch.sqrt(target_ab[0] ** 2 + target_ab[1] ** 2)
     saturation_diff = torch.mean(torch.abs(pred_sat - target_sat)).item()
-
     return {"mae_ab": mae_ab, "saturation_diff": saturation_diff}
 
 
 def evaluate_model(checkpoint_path=None, test_dir=None, save_predictions=True):
-    """Main evaluation function"""
     hparams = load_hparams("hyperparameters.json")
-
     if test_dir is None:
         test_dir = "./data_subset/test"
     save_dir = "./predictions"
@@ -174,7 +159,7 @@ def evaluate_model(checkpoint_path=None, test_dir=None, save_predictions=True):
         checkpoint_path = find_best_checkpoint("checkpoints")
     print(f"Using checkpoint: {checkpoint_path}")
 
-    test_dataset = ColorizationDataset(test_dir, hparams["resolution"])
+    test_dataset = ColorizationDataset(test_dir)
     test_loader = DataLoader(
         test_dataset,
         batch_size=hparams["batch_size"],
@@ -182,18 +167,9 @@ def evaluate_model(checkpoint_path=None, test_dir=None, save_predictions=True):
         shuffle=False,
         pin_memory=True,
     )
+    print(f"Found {len(test_dataset)} test images in '{test_dir}'")
 
-    print(f"Found {len(test_dataset)} test images")
-
-    model = ColorizationNet(
-        in_channels=1,
-        out_channels=2,
-        dropout=hparams["dropout"],
-        vit_embed_dim=hparams["vit_embed_dim"],
-        vit_heads=hparams["vit_heads"],
-        num_vit_layers=hparams["num_vit_layers"],
-    ).to(device)
-
+    model = ViTUNetColorizer(vit_model_name="vit_tiny_patch16_224").to(device)
     load_checkpoint(checkpoint_path, model, device)
     model.eval()
 
@@ -203,27 +179,20 @@ def evaluate_model(checkpoint_path=None, test_dir=None, save_predictions=True):
         "RGB_SSIM": [],
         "AB_MAE": [],
         "Saturation_Diff": [],
-        "Confidence_Mean": [],
     }
 
     print("Starting evaluation...")
     with torch.no_grad():
-        for batch_idx, (L, ab_gt, fnames) in enumerate(
-            tqdm(test_loader, desc="Evaluating")
-        ):
+        for L, ab_gt, fnames in tqdm(test_loader, desc="Evaluating"):
             L, ab_gt = L.to(device), ab_gt.to(device)
-
             with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu"):
-
-                pred_ab, confidence = model(L)
+                pred_ab = model(L)
 
             for i in range(L.size(0)):
                 pred_ab_i = pred_ab[i].cpu()
-                confidence_i = confidence[i].cpu()
                 input_L_i = L[i].cpu()
                 ab_gt_i = ab_gt[i].cpu()
                 fname = fnames[i]
-
                 pred_rgb = lab_to_rgb_torch(input_L_i, pred_ab_i)
                 gt_rgb = lab_to_rgb_torch(input_L_i, ab_gt_i)
 
@@ -233,15 +202,11 @@ def evaluate_model(checkpoint_path=None, test_dir=None, save_predictions=True):
                 metrics["RGB_MAE"].append(mae_metric(pred_rgb, gt_rgb))
                 metrics["RGB_PSNR"].append(psnr_metric(pred_rgb, gt_rgb))
                 metrics["RGB_SSIM"].append(ssim_metric(pred_rgb, gt_rgb))
-
                 color_metrics = calculate_color_metrics(pred_ab_i, ab_gt_i)
                 metrics["AB_MAE"].append(color_metrics["mae_ab"])
                 metrics["Saturation_Diff"].append(color_metrics["saturation_diff"])
 
-                metrics["Confidence_Mean"].append(torch.mean(confidence_i).item())
-
     avg_metrics = {k: float(np.mean(v)) for k, v in metrics.items()}
-
     avg_metrics["Total_Images"] = len(test_dataset)
     avg_metrics["Checkpoint"] = os.path.basename(checkpoint_path) # type: ignore
 
@@ -259,12 +224,9 @@ def evaluate_model(checkpoint_path=None, test_dir=None, save_predictions=True):
     print(f"  PSNR: {avg_metrics['RGB_PSNR']:.2f} dB")
     print(f"  SSIM: {avg_metrics['RGB_SSIM']:.4f}")
     print("-" * 50)
-    print("Color Metrics:")
+    print("Color Metrics (LAB Space):")
     print(f"  AB MAE:           {avg_metrics['AB_MAE']:.4f}")
     print(f"  Saturation Diff:  {avg_metrics['Saturation_Diff']:.4f}")
-    print("-" * 50)
-    print("Model Metrics:")
-    print(f"  Avg Confidence:   {avg_metrics['Confidence_Mean']:.4f}")
     print("=" * 50)
 
     if save_predictions:
@@ -293,9 +255,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Don't save prediction images (faster evaluation)",
     )
-
     args = parser.parse_args()
-
     evaluate_model(
         checkpoint_path=args.checkpoint,
         test_dir=args.test_dir,

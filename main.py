@@ -5,11 +5,6 @@ import train
 import evaluate
 
 
-def folder_exists(path):
-    """Check if a folder exists"""
-    return os.path.exists(path) and os.path.isdir(path)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Main script for data subset generation, training & evaluation"
@@ -28,13 +23,14 @@ def main():
 
     args = parser.parse_args()
 
-    # Check if data directories exist
+    folder_exists = lambda path: os.path.exists(path) and os.path.isdir(path)
+
     data_dirs_exist = (
         folder_exists("./data_subset/train")
         and folder_exists("./data_subset/val")
         and folder_exists("./data_subset/test")
     )
-    
+
     if not (args.generate_data or args.train or args.evaluate):
         print("Running full pipeline: data generation -> training -> evaluation")
 
@@ -50,7 +46,6 @@ def main():
         print("Starting evaluation...")
         evaluate.evaluate_model()
 
-        print("Pipeline completed!")
         return
 
     if args.generate_data:
