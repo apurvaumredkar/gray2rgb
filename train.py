@@ -539,19 +539,19 @@ def main():
             f"  LR_G: {scheduler_G.get_last_lr()[0]:.6f} | LR_D: {scheduler_D.get_last_lr()[0]:.6f}"
         )
 
-        if epoch % 5 == 0:
-            checkpoint_path = os.path.join(
-                config["checkpoint_dir"], f"checkpoint_epoch_{epoch:03d}.pt"
-            )
-            save_checkpoint(
-                generator,
-                discriminator,
-                optimizer_G,
-                optimizer_D,
-                epoch,
-                val_g_loss,
-                checkpoint_path,
-            )
+        
+        checkpoint_path = os.path.join(
+            config["checkpoint_dir"], f"checkpoint_epoch_{epoch:03d}.pt"
+        )
+        save_checkpoint(
+            generator,
+            discriminator,
+            optimizer_G,
+            optimizer_D,
+            epoch,
+            val_g_loss,
+            checkpoint_path,
+        )
 
         if val_metrics["mae"] < best_val_mae:
             best_val_mae = val_metrics["mae"]
