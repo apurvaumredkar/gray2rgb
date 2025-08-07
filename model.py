@@ -10,10 +10,10 @@ class EncoderBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(EncoderBlock, self).__init__()
         self.conv_block = nn.Sequential(
-                            nn.Conv2d(in_channels, out_channels // 2, kernel_size=3, padding=1),
-                            nn.GroupNorm(8, out_channels // 2),
+                            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+                            nn.GroupNorm(8, out_channels),
                             nn.LeakyReLU(0.01, inplace=True),
-                            nn.Conv2d(out_channels // 2, out_channels, kernel_size=3, padding=1),
+                            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
                             nn.GroupNorm(8, out_channels),
                             nn.LeakyReLU(0.01, inplace=True),
                         )
@@ -34,10 +34,10 @@ class DecoderBlock(nn.Module):
         conv_in_channels = in_channels // 2 + skip_channels
         
         self.conv_block = nn.Sequential(
-                            nn.Conv2d(conv_in_channels, out_channels // 2, kernel_size=3, padding=1),
-                            nn.GroupNorm(8, out_channels // 2),
+                            nn.Conv2d(conv_in_channels, out_channels, kernel_size=3, padding=1),
+                            nn.GroupNorm(8, out_channels),
                             nn.LeakyReLU(0.01, inplace=True),
-                            nn.Conv2d(out_channels // 2, out_channels, kernel_size=3, padding=1),
+                            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
                             nn.GroupNorm(8, out_channels),
                             nn.LeakyReLU(0.01, inplace=True),
                         )
@@ -195,8 +195,8 @@ class PatchDiscriminator(nn.Module):
                 )
             ]
             if normalize:
-                layers.append(nn.GroupNorm(8, out_filters)) # type: ignore
-            layers.append(nn.LeakyReLU(0.2, inplace=True)) # type: ignore
+                layers.append(nn.BatchNorm2d(out_filters)) # type: ignore
+            layers.append(nn.ReLU(inplace=True)) # type: ignore
             return layers
 
         self.model = nn.Sequential(
@@ -208,11 +208,11 @@ class PatchDiscriminator(nn.Module):
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
-        if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+        if isinstance(m, nn.Conv2d):
             nn.init.normal_(m.weight, 0.0, 0.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.GroupNorm):
+        elif isinstance(m, nn.BatchNorm2d):
             if m.weight is not None:
                 nn.init.normal_(m.weight, 1.0, 0.02)
             if m.bias is not None:
