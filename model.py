@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import timm
 import json
+from torch.nn.utils import spectral_norm
 from torchinfo import summary
 
 
@@ -185,36 +186,30 @@ class ViTUNetColorizer(nn.Module):
 
 
 class PatchDiscriminator(nn.Module):
-    def __init__(self, in_channels=3, n_filters=32):
+    def __init__(self, in_channels=3, n_filters=64):
         super(PatchDiscriminator, self).__init__()
 
-        def discriminator_block(in_filters, out_filters, stride=2, normalize=True):
-            layers = [
-                nn.Conv2d(
-                    in_filters, out_filters, kernel_size=4, stride=stride, padding=1
-                )
+        def discriminator_block(in_filters, out_filters, stride=2):
+            return [
+                spectral_norm(
+                    nn.Conv2d(
+                        in_filters, out_filters, kernel_size=4, stride=stride, padding=1
+                    )
+                ),
+                nn.LeakyReLU(0.01, inplace=True)
             ]
-            if normalize:
-                layers.append(nn.BatchNorm2d(out_filters)) # type: ignore
-            layers.append(nn.ReLU(inplace=True)) # type: ignore
-            return layers
 
         self.model = nn.Sequential(
-            *discriminator_block(in_channels, n_filters, normalize=False),
+            *discriminator_block(in_channels, n_filters),
             *discriminator_block(n_filters, n_filters * 2),
             *discriminator_block(n_filters * 2, n_filters * 4),
-            nn.Conv2d(n_filters * 4, 1, kernel_size=4, padding=1)
+            spectral_norm(nn.Conv2d(n_filters * 4, 1, kernel_size=4, padding=1))
         )
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Conv2d):
             nn.init.normal_(m.weight, 0.0, 0.02)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.BatchNorm2d):
-            if m.weight is not None:
-                nn.init.normal_(m.weight, 1.0, 0.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 

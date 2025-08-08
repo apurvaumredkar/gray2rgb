@@ -338,8 +338,10 @@ def validate(
             progress_bar.set_postfix(
                 {
                     "G_loss": f"{g_loss.item():.4f}",
+                    "D_loss": f"{d_loss.item():.4f}", 
                     "mae": f"{float(batch_mae/batch_size):.4f}",
                     "psnr": f"{float(batch_psnr/batch_size):.2f}",
+                    "ssim": f"{float(batch_ssim/batch_size):.2f}",
                 }
             )
 
@@ -488,6 +490,7 @@ def main():
         "val_g_loss": [],
         "val_d_loss": [],
         "val_metrics": [],
+        "epoch_duration": []
     }
 
     best_val_mae = float('inf')
