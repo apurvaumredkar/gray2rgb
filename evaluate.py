@@ -20,40 +20,38 @@ print(f"Using device: {device}")
 
 
 def lab_to_rgb_torch(L, ab):
-    """Convert LAB back to RGB - updated to match training script normalization"""
     lab = torch.cat([L * 100.0, ab * 110.0], dim=0).unsqueeze(0)
     rgb = kc.lab_to_rgb(lab).squeeze(0).clamp(0, 1)
     return rgb
 
 
 def save_prediction(pred_tensor, save_path):
-    """Save prediction image"""
     save_image(pred_tensor.clamp(0, 1), save_path)
 
 
 def find_best_checkpoint(ckpt_dir="checkpoints"):
-    """Find the best model checkpoint"""
-    best_path = os.path.join(ckpt_dir, "best_model.pt")
-    if os.path.exists(best_path):
-        return best_path
-
-    pattern = re.compile(r"checkpoint_epoch_(\d+)\.pt$")
+    pattern = re.compile(r"checkpoint_epoch_(\d+)_(\d{8}_\d{6})\.pt$")
     candidates = []
+
+    print(f"Searching for checkpoints in '{ckpt_dir}'...")
     for fname in os.listdir(ckpt_dir):
-        m = pattern.match(fname)
-        if m:
-            epoch = int(m.group(1))
-            candidates.append((epoch, fname))
+        if pattern.match(fname):
+            candidates.append(fname)
 
     if not candidates:
-        raise FileNotFoundError(f"No checkpoints found in {ckpt_dir}")
+        raise FileNotFoundError(
+            f"No valid timestamped checkpoints found in '{ckpt_dir}'. "
+            "Please ensure checkpoints are named like 'checkpoint_epoch_XXX_YYYYMMDD_HHMMSS.pt'."
+        )
 
-    candidates.sort(reverse=True)
-    return os.path.join(ckpt_dir, candidates[0][1])
+    candidates.sort()
+
+    latest_checkpoint = candidates[-1]
+    print(f"No checkpoint specified. Found latest checkpoint: {latest_checkpoint}")
+    return os.path.join(ckpt_dir, latest_checkpoint)
 
 
 def load_checkpoint(checkpoint_path, model, device):
-    """Load model from checkpoint"""
     checkpoint = torch.load(checkpoint_path, map_location=device)
     if "generator_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["generator_state_dict"])
@@ -66,7 +64,6 @@ def load_checkpoint(checkpoint_path, model, device):
 
 
 def load_hparams(path="hyperparameters.json"):
-    """Load hyperparameters with defaults"""
     defaults = {
         "batch_size": 16,
         "resolution": 256,
@@ -242,7 +239,7 @@ if __name__ == "__main__":
         "--checkpoint",
         type=str,
         default=None,
-        help="Path to model checkpoint. If omitted, uses best_model.pt or latest checkpoint.",
+        help="Path to model checkpoint. If omitted, uses latest checkpoint.",
     )
     parser.add_argument(
         "--test_dir",

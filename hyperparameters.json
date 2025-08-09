@@ -11,9 +11,9 @@
   "learning_rate_vit": 1e-05,
   "weight_decay": 1e-4,
   "freeze_vit_epochs": 3,
-  "lambda_l1": 100.0,
-  "lambda_perceptual": 20.0,
-  "lambda_adv": 5.0,
+  "lambda_l1": 70.0,
+  "lambda_perceptual": 30.0,
+  "lambda_adv": 10.0,
   "train_dir": "./data_subset/train",
   "val_dir": "./data_subset/val",
   "checkpoint_dir": "./checkpoints"

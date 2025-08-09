@@ -1,0 +1,9 @@
+{
+    "RGB_MAE": 0.04218134797853418,
+    "RGB_PSNR": 25.173848436894094,
+    "RGB_SSIM": 0.9428937435150146,
+    "AB_MAE": 0.07086952608218416,
+    "Saturation_Diff": 0.08232991083459928,
+    "Total_Images": 5000,
+    "Checkpoint": "checkpoint_epoch_015_20250808_154437.pt"
+}

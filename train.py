@@ -16,6 +16,8 @@ from PIL import Image
 from model import ViTUNetColorizer, PatchDiscriminator
 import kornia.color as kc
 from skimage import color
+import argparse
+from datetime import datetime
 
 from evaluate import mae_metric, psnr_metric, ssim_metric
 
@@ -371,7 +373,34 @@ def save_checkpoint(
     torch.save(checkpoint, filepath)
 
 
+def load_checkpoint_for_resume(
+    generator, discriminator, optimizer_G, optimizer_D, filepath, device
+):
+    print(f"Resuming training from checkpoint: {filepath}")
+    checkpoint = torch.load(filepath, map_location=device)
+    generator.load_state_dict(checkpoint["generator_state_dict"])
+    discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
+    optimizer_G.load_state_dict(checkpoint["optimizer_G_state_dict"])
+    optimizer_D.load_state_dict(checkpoint["optimizer_D_state_dict"])
+    return checkpoint["epoch"]
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Train a colorization GAN.")
+    parser.add_argument(
+        "--resume_checkpoint",
+        type=str,
+        default=None,
+        help="Path to the checkpoint .pt file to resume training from.",
+    )
+    parser.add_argument(
+        "--resume_history",
+        type=str,
+        default=None,
+        help="Path to the training_history.json file to continue logging.",
+    )
+    args = parser.parse_args()
+
     try:
         with open("hyperparameters.json", "r") as f:
             hparams = json.load(f)
@@ -406,9 +435,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-
     torch.backends.cudnn.benchmark = True
-
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
 
     try:
@@ -418,9 +445,7 @@ def main():
         bin_edges_b = lab_weights_data["b_edges"]
     except FileNotFoundError:
         print("Error: 'lab_weights.npz' not found.")
-        print(
-            "Please run 'generate_data_subset.py' first to create the data subset and compute the weights."
-        )
+        print("Please run 'generate_data_subset.py' first.")
         return
 
     weights = weights.to(device)
@@ -429,26 +454,62 @@ def main():
         vit_model_name="vit_tiny_patch16_224",
         freeze_vit_epochs=config["freeze_vit_epochs"],
     ).to(device)
-
     discriminator = PatchDiscriminator(in_channels=3).to(device)
 
     param_groups = generator.get_param_groups(
         lr_decoder=config["learning_rate"], lr_vit=config["learning_rate_vit"]
     )
     optimizer_G = AdamW(param_groups, weight_decay=config["weight_decay"])
-
     optimizer_D = AdamW(
         discriminator.parameters(),
         lr=config["learning_rate"],
         weight_decay=config["weight_decay"],
     )
+    
+    start_epoch = 1
+    history = None
 
-    scheduler_G = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer_G, T_max=config["epochs"], eta_min=1e-6
-    )
-    scheduler_D = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer_D, T_max=config["epochs"], eta_min=1e-6
-    )
+    if args.resume_checkpoint:
+        last_epoch = load_checkpoint_for_resume(
+            generator, discriminator, optimizer_G, optimizer_D, args.resume_checkpoint, device
+        )
+        start_epoch = last_epoch + 1
+
+    if args.resume_history:
+        with open(args.resume_history, "r") as f:
+            loaded_data = json.load(f)
+        
+        if args.resume_checkpoint:
+            last_epoch = start_epoch - 1
+            num_history_epochs = len(loaded_data["history"]["train_g_loss"])
+            if num_history_epochs < last_epoch:
+                raise ValueError(
+                    f"History file has only {num_history_epochs} epochs, but checkpoint is from epoch {last_epoch}."
+                )
+        history = loaded_data["history"]
+        print(f"Loaded history with {len(history['train_g_loss'])} epochs.")
+
+
+    if history is None:
+        print("Starting training from scratch.")
+        history = {
+            "train_g_loss": [], "train_d_loss": [],
+            "val_g_loss": [], "val_d_loss": [],
+            "val_metrics": [], "epoch_duration_seconds": [],
+            "lr_g_decoder": [], "lr_g_vit": [], "lr_d": [],
+        }
+
+    
+    remaining_epochs = config["epochs"] - (start_epoch - 1)
+    if remaining_epochs <= 0:
+        print("Training is already complete according to the checkpoint epoch.")
+        return
+        
+    scheduler_G = CosineAnnealingLR(optimizer_G, T_max=remaining_epochs, eta_min=1e-6)
+    scheduler_D = CosineAnnealingLR(optimizer_D, T_max=remaining_epochs, eta_min=1e-6)
+    
+    train_dataset = ColorizationDataset(config["train_dir"])
+    val_dataset = ColorizationDataset(config["val_dir"])
 
     criterion = CombinedLoss(
         lambda_l1=config["lambda_l1"],
@@ -459,118 +520,63 @@ def main():
         bin_edges_b=bin_edges_b,
     ).to(device)
 
-    train_dataset = ColorizationDataset(config["train_dir"])
-    val_dataset = ColorizationDataset(config["val_dir"])
-
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=config["batch_size"],
-        shuffle=True,
-        num_workers=config["num_workers"],
-        pin_memory=True,
-        persistent_workers=True,
+        train_dataset, batch_size=config["batch_size"], shuffle=True,
+        num_workers=config["num_workers"], pin_memory=True, persistent_workers=True,
         prefetch_factor=config["prefetch_factor"]
     )
-
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=config["batch_size"],
-        shuffle=False,
-        num_workers=config["num_workers"],
-        pin_memory=True,
-        persistent_workers=True,
+        val_dataset, batch_size=config["batch_size"], shuffle=False,
+        num_workers=config["num_workers"], pin_memory=True, persistent_workers=True,
         prefetch_factor=config["prefetch_factor"]
     )
-
     scaler = torch.GradScaler()
 
-    history = {
-        "train_g_loss": [],
-        "train_d_loss": [],
-        "val_g_loss": [],
-        "val_d_loss": [],
-        "val_metrics": [],
-        "epoch_duration": []
-    }
-
-    best_val_mae = float('inf')
-
-    for epoch in range(1, config["epochs"] + 1):
-
+    print(f"Starting training from epoch {start_epoch} for {remaining_epochs} epochs.")
+    for epoch in range(start_epoch, config["epochs"] + 1):
         start_time = time.time()
+        
         train_g_loss, train_d_loss, _ = train_one_epoch(
-            generator,
-            discriminator,
-            train_loader,
-            criterion,
-            optimizer_G,
-            optimizer_D,
-            device,
-            scaler,
-            epoch,
-            config["epochs"],
+            generator, discriminator, train_loader, criterion,
+            optimizer_G, optimizer_D, device, scaler, epoch, config["epochs"],
         )
-
+        
+        val_g_loss, val_d_loss, val_metrics = validate(
+            generator, discriminator, val_loader, criterion,
+            device, epoch, config["epochs"],
+        )
+        
         end_time = time.time()
         epoch_duration = end_time - start_time
-
-        val_g_loss, val_d_loss, val_metrics = validate(
-            generator,
-            discriminator,
-            val_loader,
-            criterion,
-            device,
-            epoch,
-            config["epochs"],
-        )
-
-        scheduler_G.step()
-        scheduler_D.step()
 
         history["train_g_loss"].append(train_g_loss)
         history["train_d_loss"].append(train_d_loss)
         history["val_g_loss"].append(val_g_loss)
         history["val_d_loss"].append(val_d_loss)
         history["val_metrics"].append(val_metrics)
-        history["epoch_duration"].append(epoch_duration)
-
-        print(f"Epoch {epoch}/{config['epochs']}:")
-        print(f"  Train - G_Loss: {train_g_loss:.4f} | D_Loss: {train_d_loss:.4f}")
-        print(f"  Val - G_Loss: {val_g_loss:.4f} | D_Loss: {val_d_loss:.4f}")
-        print(
-            f"  Val Metrics - MAE: {float(val_metrics['mae']):.4f} | PSNR: {float(val_metrics['psnr']):.2f} | SSIM: {float(val_metrics['ssim']):.3f}"
-        )
-        print(
-            f"  LR_G: {scheduler_G.get_last_lr()[0]:.6f} | LR_D: {scheduler_D.get_last_lr()[0]:.6f}"
-        )
-
+        history["epoch_duration_seconds"].append(epoch_duration)
         
-        checkpoint_path = os.path.join(
-            config["checkpoint_dir"], f"checkpoint_epoch_{epoch:03d}.pt"
-        )
-        save_checkpoint(
-            generator,
-            discriminator,
-            optimizer_G,
-            optimizer_D,
-            epoch,
-            val_g_loss,
-            checkpoint_path,
-        )
+        lrs_g = scheduler_G.get_last_lr()
+        history["lr_g_decoder"].append(lrs_g[0])
+        history["lr_g_vit"].append(lrs_g[1])
+        history["lr_d"].append(scheduler_D.get_last_lr()[0])
 
-        if val_metrics["mae"] < best_val_mae:
-            best_val_mae = val_metrics["mae"]
-            best_path = os.path.join(config["checkpoint_dir"], "best_model.pt")
-            save_checkpoint(
-                generator,
-                discriminator,
-                optimizer_G,
-                optimizer_D,
-                epoch,
-                val_g_loss,
-                best_path,
+        print(f"\nEpoch {epoch}/{config['epochs']} completed in {epoch_duration:.2f}s")
+        print(f"  Train -> G_Loss: {train_g_loss:.4f} | D_Loss: {train_d_loss:.4f}")
+        print(f"  Val   -> G_Loss: {val_g_loss:.4f} | D_Loss: {val_d_loss:.4f}")
+        print(f"  Val Metrics -> MAE: {val_metrics['mae']:.4f} | PSNR: {val_metrics['psnr']:.2f} | SSIM: {val_metrics['ssim']:.3f}")
+        print(f"  Learning Rates -> G_Decoder: {lrs_g[0]:.2e}, G_ViT: {lrs_g[1]:.2e}, D: {scheduler_D.get_last_lr()[0]:.2e}")
+
+        scheduler_G.step()
+        scheduler_D.step()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        checkpoint_path = os.path.join(config["checkpoint_dir"], f"checkpoint_epoch_{epoch:03d}_{timestamp}.pt")
+        save_checkpoint(
+                generator, discriminator, optimizer_G, optimizer_D,
+                epoch, val_g_loss, checkpoint_path
             )
-            print(f"\tNew best model saved! MAE: {best_val_mae:.2f}")
+        print(f"  Saved checkpoint to {checkpoint_path}")
 
         with open(os.path.join("training_history.json"), "w") as f:
             json.dump({"config": config, "history": history}, f, indent=2)
@@ -578,7 +584,8 @@ def main():
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    print("Training completed! Metrics saved in training_history.json")
+    print("\nTraining completed! Final metrics saved in training_history.json")
+
 
 if __name__ == "__main__":
     main()
