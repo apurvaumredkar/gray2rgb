@@ -7,6 +7,8 @@ Team members:
 - Sharan Raj Sivakumar
 ---
 
+🚀 Our model is live! Check out it's capability in real time: https://huggingface.co/spaces/TeamSAS/ImageColorizer
+
 In this project, we aim to achieve perceptually accurate colorization of grayscale images by predicting the **ab** channels using the **L** channel as the input to the model (CIELAB color space).
 The model leverages a hybrid UNet-CNN & ViT-Tiny model trained adversarially against a Patch GAN Discriminator.
 
