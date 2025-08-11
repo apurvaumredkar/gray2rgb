@@ -505,8 +505,8 @@ def main():
         print("Training is already complete according to the checkpoint epoch.")
         return
         
-    scheduler_G = CosineAnnealingLR(optimizer_G, T_max=remaining_epochs, eta_min=1e-6)
-    scheduler_D = CosineAnnealingLR(optimizer_D, T_max=remaining_epochs, eta_min=1e-6)
+    scheduler_G = CosineAnnealingLR(optimizer_G, T_max=remaining_epochs, eta_min=1e-5)
+    scheduler_D = CosineAnnealingLR(optimizer_D, T_max=remaining_epochs, eta_min=1e-5)
     
     train_dataset = ColorizationDataset(config["train_dir"])
     val_dataset = ColorizationDataset(config["val_dir"])
