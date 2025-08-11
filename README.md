@@ -12,7 +12,7 @@ Team members:
 In this project, we aim to achieve perceptually accurate colorization of grayscale images by predicting the **ab** channels using the **L** channel as the input to the model (CIELAB color space).
 The model leverages a hybrid UNet-CNN & ViT-Tiny model trained adversarially against a Patch GAN Discriminator.
 
-![model_diagram](https://github.com/user-attachments/assets/231f4fd0-329c-4445-99dc-5924de2efb77)
+![Generator Diagram](https://github.com/user-attachments/assets/2b3bc6b3-673b-4b47-be0a-c702dbd52c54)
 
 Link to original dataset: http://places2.csail.mit.edu/download.html
 
