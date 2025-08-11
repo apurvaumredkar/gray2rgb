@@ -16,7 +16,7 @@ The model leverages a hybrid UNet-CNN & ViT-Tiny model trained adversarially aga
 
 Link to original dataset: http://places2.csail.mit.edu/download.html
 
-Link to our data subset used for training: https://drive.google.com/file/d/176k93LgMY3e2N68n2AmZ3V1b5HFfigc0/view?usp=sharing 
+Link to our data subset used for training: https://drive.google.com/file/d/1ubhq38S2fr-HNQL6-uosoQ0PqUKlM9Lj/view?usp=sharing
 
 NOTE: The `lab_weights.npz` file in this repository contains color channel distribution weights for the above subset. Generating a new datasubset using `generate_data_subset.py` will generate new weights.
 
